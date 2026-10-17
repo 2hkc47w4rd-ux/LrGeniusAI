@@ -441,6 +441,19 @@ LrTasks.startAsyncTask(function()
 					dropped.photos
 				)
 		end
-		LrDialogs.message(LOC("$$$/LrGeniusAI/CullFixture/DoneTitle=Fixture exported"), doneMessage, "info")
+		-- A fixture exported without the moment scores cannot measure them, so
+		-- whatever the backend could not judge is part of the result.
+		local fixtureWarnings = Util.responseWarnings(cullResult)
+		if #fixtureWarnings > 0 then
+			log:warn("Cull fixture: backend warnings: " .. table.concat(fixtureWarnings, " | "))
+			doneMessage = doneMessage
+				.. "\n\nThe backend reported problems, so some scores are missing from the fixture:\n\n"
+				.. Util.formatWarningList(fixtureWarnings)
+		end
+		LrDialogs.message(
+			LOC("$$$/LrGeniusAI/CullFixture/DoneTitle=Fixture exported"),
+			doneMessage,
+			#fixtureWarnings > 0 and "warning" or "info"
+		)
 	end)
 end)

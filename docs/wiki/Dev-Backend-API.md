@@ -292,21 +292,58 @@ Finds photos similar to a reference photo using perceptual hash (phash) or CLIP 
 
 ### `POST /v1/cull/groups`
 Groups a set of photos into similarity clusters (used internally by the culling workflow).
+Takes the same request fields as `/v1/cull/grade` and returns its `groups`,
+`warnings` and `warning` (see below); no `summary`.
 
 ### `POST /v1/cull/grade`
 Runs the full culling pipeline on a set of photos: grouping, scoring, and classification into picks/alternates/rejects.
 
+**Key request fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `photo_ids` | array | Photos to cull. Ids with no stored record are skipped and counted in `summary.unindexed_count` |
+| `culling_preset` | string | `default`, `portrait`, `street`, `event` or `sports`. 400 with `available_presets` for anything else |
+| `time_delta_seconds` | int | Burst window. Absent means the preset's own |
+| `phash_threshold`, `clip_threshold` | float or `"auto"` | Grouping thresholds |
+| `use_iqa` | bool | Score the CLIP-IQA signals (aesthetic, moment, kiss gate) over the stored SigLIP2 embeddings. Default true |
+| `semantic_weight` | float | Overrides the preset's moment weight, for the ranking as well as for deciding whether to score it. Clamped to 0..1 |
+| `include_stored_metadata` | bool | Echo each photo's stored `cull_*` inputs as `stored_metadata` (for fixtures) |
+| `include_debug` | bool | Per-group thresholds and pairwise distances |
+
+Every preset except `default` judges the **moment**: the stronger of the
+preset's axis (`cull_semantic_iqa`: action, expression or candid) and, for
+`sports` and `event`, an emotion question (`cull_emotion_iqa`). `event` and
+`portrait` also ask whether closed eyes are a kiss or a laugh
+(`cull_eyes_closed_intent_iqa`), which lifts the blink penalty. All three are
+computed per request from the stored embedding against prompt vectors kept in
+the database (below), and never stored themselves. Within a
+group the moment applies only when every frame has it, and frames with a
+defect no edit repairs (blur, unintended closed eyes, occlusion) always rank
+below usable ones.
+
+**Response:**
+
+| Field | Type | Description |
+|---|---|---|
+| `summary` | object | `group_count`, `pick_count`, `alternate_count`, `reject_candidate_count`, `near_duplicate_group_count`, `intentional_set_group_count`, `intentional_set_photo_count`, `culling_preset`, `unindexed_count` |
+| `groups[].winner_photo_id` | string or null | The best-ranked frame that is not a reject candidate. **`null`** when every frame is one: a blurred single, or a burst blurred throughout |
+| `groups[].alternate_photo_ids`, `groups[].reject_candidate_photo_ids` | string[] | The rest of the group |
+| `groups[].photos[]` | object[] | Per photo: `rank`, `cull_score`, `winner`, `reject_candidate`, `reason_codes`, `explanation`, `metrics`. `metrics` carries `semantic`/`semantic_axis`, `emotion`/`emotion_axis` and `moment` only when computed, `eyes_closed_intended` when true, and always `clear_defect` |
+| `warnings` | string[] | Every caveat for the run, most fundamental first: unanalyzed photos skipped, no embeddings, AI signals whose prompt vectors could not be prepared (one message naming every lost signal and the fix), photos whose moment was not judged. Empty when there is nothing to say |
+| `warning` | string or null | The same messages joined, for clients older than `warnings` |
+
 Both routes return `warnings`, every caveat for the run as a list, and `warning`, the same
 caveats joined into the one string the plugin shows (`null` when there are none). Besides photos
-that were never analyzed and photos without embeddings, a caveat is raised when the AI quality
-score could not be computed: it compares each photo's stored embedding against fixed prompt
-vectors, and those were neither in the database nor obtainable from the text tower — almost
-always because the SigLIP2 model is not downloaded. Ranking then rests on the technical
-measurements alone.
+that were never analyzed and photos without embeddings, a caveat is raised when an AI signal the
+run asked for — quality, moment, kiss gate — could not be computed: each compares a photo's stored
+embedding against fixed prompt vectors, and those were neither in the database nor obtainable from
+the text tower, almost always because the SigLIP2 model is not downloaded. The signals lost to that
+one cause share one message, and ranking rests on the technical measurements alone.
 
-The prompt vectors — CLIP-IQA quality and genre sets, the organism gate `/v1/index/photos` uses in
-front of BioCLIP, the scene probes of `/v1/edit/training` and `/v1/edit/style` — live in the
-`text_embeddings` table (`model_id`, `text`, `vector`). A request prepares the prompts it needs
+The prompt vectors — CLIP-IQA quality, genre and emotion sets, the culling kiss gate, the organism
+gate `/v1/index/photos` uses in front of BioCLIP, the scene probes of `/v1/edit/training` and
+`/v1/edit/style` — live in the `text_embeddings` table (`model_id`, `text`, `vector`). A request prepares the prompts it needs
 once, before any per-photo work: from memory, else from the table for this build's
 `lrg_ml::siglip::MODEL_ID`, else with the text tower, whose results are stored and which is unloaded
 again straight away if the request loaded it. So each prompt is embedded once per model per

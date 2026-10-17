@@ -546,6 +546,9 @@ async fn cull_returns_summary_and_group_shape_the_plugin_reads() {
     assert_eq!(group["winner_photo_id"], "burst0", "sharpest must win");
     assert!(group["photo_ids"].as_array().unwrap().len() == 3);
 
+    // TaskCullPhotos.lua reads the list; `warning` stays for older plugins.
+    assert!(json["warnings"].is_array(), "{json}");
+
     // Per-photo fields the plugin writes into catalog metadata.
     let winner = &group["photos"][0];
     assert_eq!(winner["winner"], true);
@@ -663,6 +666,52 @@ async fn cull_warning_tracks_stored_embeddings_not_model_residency() {
     );
 }
 
+/// A single that is clearly blurred is a reject candidate with no pick, and
+/// `winner_photo_id` is `null` rather than naming it. The plugin decodes JSON
+/// null to nil, which its `if winnerPhotoId` already handles.
+#[tokio::test]
+async fn a_blurred_single_has_no_winner() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path_str = dir.path().join("lrgenius.db").to_str().unwrap().to_string();
+    let (app, state) = fresh_app();
+    state.ensure_db_path(&db_path_str).await.unwrap();
+    let store = state.store().unwrap();
+    let mut meta = serde_json::Map::new();
+    meta.insert("filename".into(), serde_json::json!("soft.jpg"));
+    meta.insert("capture_time".into(), serde_json::json!(1_700_000_000));
+    meta.insert("cull_phash".into(), serde_json::json!("0f0f0f0f0f0f0f0f"));
+    meta.insert("cull_sharpness".into(), serde_json::json!(0.04));
+    meta.insert("cull_exposure".into(), serde_json::json!(0.7));
+    meta.insert("cull_noise".into(), serde_json::json!(0.1));
+    store
+        .upsert(
+            lrg_store::IMAGE_TABLE,
+            &[lrg_store::StoreRecord {
+                id: "soft".into(),
+                vector: None,
+                metadata: meta,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let json = cull_request(
+        app,
+        serde_json::json!({"photo_ids": ["soft"], "db_path": db_path_str}),
+    )
+    .await;
+
+    let group = &json["groups"][0];
+    assert_eq!(group["group_type"], "single");
+    assert!(group["winner_photo_id"].is_null(), "{group}");
+    assert_eq!(
+        group["reject_candidate_photo_ids"],
+        serde_json::json!(["soft"])
+    );
+    assert_eq!(json["summary"]["pick_count"], 0);
+    assert_eq!(json["summary"]["reject_candidate_count"], 1);
+}
+
 #[tokio::test]
 async fn cull_warns_when_no_embeddings_are_stored() {
     let dir = tempfile::tempdir().unwrap();
@@ -687,8 +736,8 @@ async fn cull_warns_when_no_embeddings_are_stored() {
 }
 
 /// Photos with embeddings, but no stored prompt vectors and no model to make
-/// them: the quality score cannot be computed, and the ranking that skipped it
-/// has to say so — and say how to fix it.
+/// them: neither the quality score nor the moment can be computed, and the
+/// ranking that skipped them has to say so — and say how to fix it.
 #[tokio::test]
 async fn cull_warns_when_quality_scoring_has_no_prompts() {
     let dir = tempfile::tempdir().unwrap();
@@ -697,8 +746,8 @@ async fn cull_warns_when_quality_scoring_has_no_prompts() {
     state.ensure_db_path(&db_path_str).await.unwrap();
     seed_burst(&state, 3, true).await;
 
-    // `sports` ranks with the action set as well as quality, so two sets
-    // miss for one cause.
+    // `sports` ranks with quality, the action set and the sport emotion set,
+    // so three sets miss for one cause.
     let json = cull_request(
         app,
         serde_json::json!({
@@ -709,16 +758,23 @@ async fn cull_warns_when_quality_scoring_has_no_prompts() {
     )
     .await;
 
-    // Said once, not once per set.
+    // The run still succeeds, ranked on sharpness, exposure and faces.
+    assert_eq!(json["status"], "success");
+    assert_eq!(json["summary"]["group_count"], 1);
+    assert_eq!(json["groups"][0]["winner_photo_id"], "burst0");
+    // Said once, not once per set — and not a second time as photos whose
+    // moment went unjudged, which is the same cause.
     let warnings = json["warnings"].as_array().unwrap();
     assert_eq!(warnings.len(), 1, "{json}");
-    // The string the plug-in shows carries it too.
-    let warning = json["warning"].as_str().unwrap_or_default();
+    let warning = warnings[0].as_str().unwrap();
     assert!(
-        warning.contains("quality score") && warning.contains("Download AI models"),
-        "expected a quality-scoring caveat naming the fix, got {warning:?}"
+        warning.contains("quality score")
+            && warning.contains("moment")
+            && warning.contains("Download AI models"),
+        "expected one caveat naming every lost signal and the fix, got {warning:?}"
     );
-    assert_eq!(json["summary"]["group_count"], 1);
+    // The string the plug-in shows carries it too.
+    assert_eq!(json["warning"], warnings[0], "{json}");
 }
 
 /// A second catalog's database gets the prompt vectors from the first one's
