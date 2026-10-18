@@ -47,9 +47,9 @@ fn models_absent() -> ModelAssetPaths {
     let dir = NO_MODELS.path();
     ModelAssetPaths {
         siglip: lrg_ml::siglip::ModelPaths {
-            image_onnx: dir.join("siglip2_image.onnx"),
-            text_onnx: dir.join("siglip2_text.onnx"),
-            tokenizer_json: dir.join("tokenizer.json"),
+            image_onnx: dir.join("siglip2_naflex_image.onnx"),
+            text_onnx: dir.join("siglip2_naflex_text.onnx"),
+            tokenizer_json: dir.join("siglip2_naflex_tokenizer.json"),
         },
         face: lrg_ml::faces::FaceModelPaths {
             det_onnx: dir.join("yunet_face_detection.onnx"),
@@ -516,6 +516,46 @@ async fn cull_request(app: axum::Router, body: serde_json::Value) -> serde_json:
     body_json(response).await
 }
 
+/// A search can only find embeddings made by the model it embeds the query
+/// with, so stats say how many stored ones were made by another.
+#[tokio::test]
+async fn stats_count_embeddings_from_another_search_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("lrgenius.db").to_str().unwrap().to_string();
+    let (app, state) = fresh_app();
+    state.ensure_db_path(&db_path).await.unwrap();
+    let row = |id: &str, model: Option<&str>| {
+        let mut m = serde_json::Map::new();
+        m.insert("has_embedding".into(), serde_json::json!(true));
+        if let Some(model) = model {
+            m.insert("embedding_model".into(), serde_json::json!(model));
+        }
+        lrg_store::StoreRecord {
+            id: id.into(),
+            vector: Some(vec![0.1; 1152]),
+            metadata: m,
+        }
+    };
+    state
+        .store()
+        .unwrap()
+        .upsert(
+            lrg_store::IMAGE_TABLE,
+            &[
+                row("current", Some(lrg_ml::siglip::MODEL_ID)),
+                row("legacy", Some(lrg_ml::siglip::LEGACY_MODEL_ID)),
+                row("unstamped", None),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let stats = get_json(&app, "/v1/db/stats").await;
+    assert_eq!(stats["photos"]["with_embedding"], 3);
+    // The unstamped row counts as current, as in /v1/index/unprocessed.
+    assert_eq!(stats["photos"]["with_outdated_embedding"], 1);
+}
+
 #[tokio::test]
 async fn cull_returns_summary_and_group_shape_the_plugin_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -886,7 +926,13 @@ async fn binding_stamps_the_embedding_model_on_rows_that_predate_it() {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
     };
-    assert_eq!(model_of("old").as_deref(), Some(lrg_ml::siglip::MODEL_ID));
+    // The earlier model, not this build's: those vectors were made by it, and
+    // labelling them as current would keep them from ever being re-embedded.
+    assert_eq!(
+        model_of("old").as_deref(),
+        Some(lrg_ml::siglip::LEGACY_MODEL_ID)
+    );
+    assert_ne!(model_of("old").as_deref(), Some(lrg_ml::siglip::MODEL_ID));
     assert_eq!(model_of("other").as_deref(), Some("some-previous-model"));
 }
 
