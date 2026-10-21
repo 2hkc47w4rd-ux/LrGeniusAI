@@ -46,6 +46,83 @@ pub fn read_iso(image_bytes: &[u8]) -> Option<f64> {
     None
 }
 
+/// Capture time as seconds since the Unix epoch, from `DateTimeOriginal`
+/// (falling back to `DateTime`), or `None` when the frame carries neither.
+///
+/// The EXIF clock is local time with no zone, so this reads it as if it were
+/// UTC. That is wrong by the camera's offset, but *consistently* wrong across
+/// one shoot, and the only consumer — burst grouping — compares frames to each
+/// other. A frame whose date was never set (1970, or a camera reset to its
+/// factory 2000-01-01) is still returned: it is wrong, but wrong for every
+/// frame of that shoot alike, which still groups them correctly.
+pub fn read_capture_time(image_bytes: &[u8]) -> Option<f64> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut Cursor::new(image_bytes))
+        .ok()?;
+    for tag in [exif::Tag::DateTimeOriginal, exif::Tag::DateTime] {
+        let Some(field) = exif.get_field(tag, exif::In::PRIMARY) else {
+            continue;
+        };
+        let exif::Value::Ascii(parts) = &field.value else {
+            continue;
+        };
+        let Some(text) = parts.first().and_then(|b| std::str::from_utf8(b).ok()) else {
+            continue;
+        };
+        if let Some(ts) = parse_exif_datetime(text.trim()) {
+            return Some(ts);
+        }
+    }
+    None
+}
+
+/// `YYYY:MM:DD HH:MM:SS` to Unix seconds, treating the value as UTC. Returns
+/// `None` for the all-zero placeholder some bodies write, and for anything
+/// that does not parse.
+fn parse_exif_datetime(text: &str) -> Option<f64> {
+    let mut nums = [0i64; 6];
+    let mut parts = text.split([':', ' ']).filter(|p| !p.is_empty());
+    for slot in nums.iter_mut() {
+        *slot = parts.next()?.parse().ok()?;
+    }
+    let [year, month, day, hour, minute, second] = nums;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || year < 1900 {
+        return None;
+    }
+    // Days from civil, Howard Hinnant's algorithm: exact for the proleptic
+    // Gregorian calendar, no table of month lengths needed.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some((days * 86_400 + hour * 3_600 + minute * 60 + second) as f64)
+}
+
+#[cfg(test)]
+mod capture_time_tests {
+    use super::parse_exif_datetime;
+
+    #[test]
+    fn exif_datetime_converts_to_unix_seconds() {
+        // 2026-10-21 11:30:00 UTC.
+        assert_eq!(
+            parse_exif_datetime("2026:10:21 11:30:00"),
+            Some(1_792_582_200.0)
+        );
+        assert_eq!(parse_exif_datetime("1970:01:01 00:00:00"), Some(0.0));
+    }
+
+    #[test]
+    fn placeholder_and_garbage_read_as_absent() {
+        assert_eq!(parse_exif_datetime("0000:00:00 00:00:00"), None);
+        assert_eq!(parse_exif_datetime(""), None);
+        assert_eq!(parse_exif_datetime("yesterday"), None);
+    }
+}
+
 /// Whether a filename names a raw file.
 ///
 /// Decides whether clipped highlights are recoverable, which is the one place

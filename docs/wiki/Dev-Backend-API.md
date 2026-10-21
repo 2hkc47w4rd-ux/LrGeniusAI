@@ -240,7 +240,7 @@ producer this build uses*, not merely present:
 | `aesthetic` (also implied by `embeddings` and `cull`) | no `aesthetic_score`, or an `aesthetic_model` that is not this build's — and only when the scorer is on disk, since a missing model cannot be fixed by running again |
 | genre (with `embeddings`, `cull` and `aesthetic`) | an embedding but no `genre`, or a `genre_version` that is not this build's (the genre list or its prompts changed), and only when the search model is on disk. Made again from the stored embedding, so the photo is not re-embedded |
 | `species` | no `species_checked`, or a `species_model` that is not the head on disk |
-| `cull` | no `cull_phash`, or no `cull_faces_present` key |
+| `cull` | no `cull_phash`, no `cull_faces_present` key, or no `capture_time` without a `capture_time_unknown` stamp (grouping needs the time; a photo prepared before the fast path sent it is prepared again once, and one with no time in the catalog or the file's EXIF is stamped so it is not asked for again) |
 | `metadata` | no title, caption, alt_text or keywords |
 
 `regenerate_metadata` overrides all of them.

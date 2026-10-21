@@ -225,6 +225,26 @@ pub struct RankingConfig {
     /// near-copy would claim the stronger moment. A real difference — the
     /// celebration against the empty frame — is several times this.
     pub reason_moment_margin: f64,
+    /// Judge the face-proxy defects — blink, occlusion, weak face score —
+    /// against the group as well as against their absolute thresholds.
+    ///
+    /// Measured on a real 797-frame baptism: the eye-openness proxy read
+    /// 0.07–0.26 on every frame (its patch is clamped to 8 px and the faces
+    /// are small), so `blink_penalty` sat above the Event reject threshold on
+    /// 767 of 769 frames with faces, occlusion above its threshold on 515, and
+    /// `cull_face_score` below its threshold on nearly all. Every frame that
+    /// was not a group's pick was a "clear defect", and 667 of 797 frames were
+    /// nominated for deletion at the *gentle* strength. The proxies cannot
+    /// tell an open eye from a closed one on a small face, but they can still
+    /// tell a frame from its siblings — so a frame is only a blink when its
+    /// eyes are visibly less open than the best frame of the group, only
+    /// occluded when it is visibly more obstructed than the clearest, and only
+    /// weak-faced when it is visibly weaker than the strongest.
+    pub relative_defect_rules: bool,
+    /// How far below the group's best (eye openness, face score) or above its
+    /// best (occlusion) a frame must sit for the proxy to count as a defect
+    /// under [`Self::relative_defect_rules`].
+    pub relative_defect_margin: f64,
 }
 
 /// Which deliberately-captured multi-frame set a group is, if any.
@@ -322,6 +342,8 @@ impl CullingConfig {
     /// - `usable_gate` and `reject_blurred_without_alternative` — a strong
     ///   moment could otherwise lift an unusable frame, and a blurred single or
     ///   the best of a blurred burst was always a pick
+    /// - `relative_defect_rules` — the face proxies fire on nearly every real
+    ///   frame, so absolute thresholds rejected 84% of a real shoot
     pub fn python_parity() -> Self {
         let mut cfg = BASE;
         cfg.ranking.sharpness_peak_weight = 0.0;
@@ -332,6 +354,7 @@ impl CullingConfig {
         cfg.grouping.bracket_edges = false;
         cfg.ranking.usable_gate = false;
         cfg.ranking.reject_blurred_without_alternative = false;
+        cfg.ranking.relative_defect_rules = false;
         cfg
     }
 }
@@ -389,6 +412,8 @@ const BASE: CullingConfig = CullingConfig {
         reject_blurred_without_alternative: true,
         reason_motion_anisotropy_threshold: 0.55,
         reason_moment_margin: 0.15,
+        relative_defect_rules: true,
+        relative_defect_margin: 0.10,
     },
     sets: SetDetectionConfig {
         enabled: true,

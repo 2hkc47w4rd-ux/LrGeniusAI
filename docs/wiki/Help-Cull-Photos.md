@@ -275,6 +275,21 @@ ranked on a simpler contrast-and-colour estimate instead, which can compare
 unevenly with scored frames in the same group. Run **Analyze & Index Photos** on
 them to fill it in.
 
+## Capture time and grouping
+
+Burst grouping runs on each photo's capture time. The fast preparation pass
+sends it from the catalog, and the backend reads it from the file's EXIF when
+the catalog has none. Photos prepared by an older version without it group
+badly (whole sequences of similar frames collapse into one group with one
+pick), so the plugin offers to prepare them again once; a photo that has no
+capture time anywhere is remembered as such and not asked about again.
+
+Face-based rejects — a blink, a blocked face, a weak face — are judged
+against the other frames of the group as well as against fixed thresholds: a
+frame is only a blink when its eyes read clearly less open than the best frame
+of its burst. On small faces the eye estimate reads "closed" on every frame,
+and without this every frame but the pick was a reject.
+
 ## Tips for best results
 
 - Run culling after you have narrowed down an initial selection for a shoot (for example by folder or date range).

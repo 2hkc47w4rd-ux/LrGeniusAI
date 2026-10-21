@@ -1421,8 +1421,22 @@ async fn prepare_one(
         photo_id,
     );
 
-    if let Some(ct) = overrides.capture_time.or(options.capture_time) {
+    // The plugin's value first; failing that, the file's own EXIF. Burst
+    // grouping needs this on every frame: without it the grouper treats the
+    // photo as undated and matches it against the whole selection by hash and
+    // embedding alone, which on a real ceremony chained 123 frames into one
+    // group with one pick. The fast cull-prep path used not to send it at all.
+    let capture_time = overrides
+        .capture_time
+        .or(options.capture_time)
+        .or_else(|| lrg_imaging::capture::read_capture_time(image_bytes));
+    if let Some(ct) = capture_time {
         main_metadata.insert("capture_time".into(), json!(ct));
+        main_metadata.remove("capture_time_unknown");
+    } else if !main_metadata.contains_key("capture_time") {
+        // Recorded so `/index/unprocessed` does not ask for this photo to be
+        // prepared again on every cull: nothing more can be learned about it.
+        main_metadata.insert("capture_time_unknown".into(), json!(true));
     }
     // Only written when the plugin sent it. Never defaulted to 0.0: bracket
     // detection requires *every* frame in a group to carry a value, and a

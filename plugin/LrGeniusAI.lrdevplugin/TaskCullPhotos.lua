@@ -322,6 +322,16 @@ local function cullPrepare(missingIds, photoById, progressScope, tasks)
 		if type(exposureBias) == "number" then
 			indexOptions.exposure_bias = exposureBias
 		end
+		-- The capture time is what burst grouping runs on. This path used to
+		-- leave it out, so every photo it prepared was undated to the backend
+		-- and the grouper matched it against the whole selection by hash and
+		-- embedding alone: on a real ceremony that chained 123 frames into one
+		-- group with a single pick. Same fields as Analyze & Index sends.
+		local datetime = photo:getRawMetadata("dateTime")
+		if type(datetime) == "number" then
+			indexOptions.date_time = LrDate.timeToW3CDate(datetime)
+			indexOptions.date_time_unix = LrDate.timeToPosixDate(datetime)
+		end
 		return indexOptions
 	end
 

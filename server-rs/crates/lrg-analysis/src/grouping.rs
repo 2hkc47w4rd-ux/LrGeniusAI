@@ -228,6 +228,9 @@ struct Scored<'a> {
     /// Blurred, eyes shut or face obstructed: the defects that make a frame
     /// unusable however strong its moment, because no edit repairs them.
     hard_defect: bool,
+    /// The composite face score fell below the reject threshold — and, under
+    /// the relative rules, clearly below the group's best.
+    weak_face: bool,
     cull_exposure: f64,
     /// The noise penalty the score uses: `cull_noise_flat` when the row has
     /// it, else the frame-wide `cull_noise`.
@@ -456,6 +459,7 @@ fn rank_group_records(
                 moment: None,
                 eyes_closed_intended,
                 hard_defect: false,
+                weak_face: false,
                 cull_exposure: exposure,
                 cull_noise: noise_penalty,
                 cull_noise_frame_wide: noise_flat.map(|_| noise_frame_wide),
@@ -499,6 +503,22 @@ fn rank_group_records(
     for (item, moment) in scored.iter_mut().zip(moments) {
         item.moment = if moment_active { moment } else { None };
     }
+
+    // The group's best face readings, for the relative defect rules: a proxy
+    // that reads "closed" on every frame of a burst says nothing about any one
+    // of them, but a frame that reads clearly worse than its siblings does.
+    let faced = scored.iter().filter(|s| s.cull_face_count > 0);
+    let best_eye_openness = faced
+        .clone()
+        .map(|s| s.cull_eye_openness)
+        .fold(f64::MIN, f64::max);
+    let least_occlusion = faced
+        .clone()
+        .map(|s| s.cull_occlusion)
+        .fold(f64::MAX, f64::min);
+    let best_face_score = faced.map(|s| s.cull_face_score).fold(f64::MIN, f64::max);
+    let relative = rk.relative_defect_rules;
+    let margin = rk.relative_defect_margin.max(0.0);
 
     for item in scored.iter_mut() {
         // A kiss or a laugh with the eyes shut is not a blink, so the gate
@@ -557,12 +577,22 @@ fn rank_group_records(
         // darker celebration must still be able to beat a bright empty frame.
         // Nor is the composite face score, which also falls for a face that
         // is merely small in the frame.
+        //
+        // Under `relative_defect_rules` the two face proxies also have to be
+        // clearly worse than the group's best before they count: measured on a
+        // real shoot they sat past their absolute thresholds on almost every
+        // frame, which made every non-pick a "clear defect".
+        let blink_defect = !item.eyes_closed_intended
+            && item.cull_blink_penalty > rk.reject_blink_penalty_threshold
+            && (!relative || item.cull_eye_openness < best_eye_openness - margin);
+        let occlusion_defect = item.cull_occlusion > rk.reject_occlusion_threshold
+            && (!relative || item.cull_occlusion > least_occlusion + margin);
         item.hard_defect = item.sharpness_effective < rk.reason_blur_threshold
-            || (group_has_faces
-                && item.cull_face_count > 0
-                && ((!item.eyes_closed_intended
-                    && item.cull_blink_penalty > rk.reject_blink_penalty_threshold)
-                    || item.cull_occlusion > rk.reject_occlusion_threshold));
+            || (group_has_faces && item.cull_face_count > 0 && (blink_defect || occlusion_defect));
+        item.weak_face = group_has_faces
+            && item.cull_face_count > 0
+            && item.cull_face_score < rk.reject_face_score_threshold
+            && (!relative || item.cull_face_score < best_face_score - margin);
     }
 
     // First usable, then the moment: every frame without a clear defect ranks
@@ -639,9 +669,7 @@ fn rank_group_records(
             item.cull_score <= (winner_score - rk.reject_score_delta).max(0.0)
                 || item.hard_defect
                 || item.cull_exposure < rk.reject_exposure_threshold
-                || (group_has_faces
-                    && item.cull_face_count > 0
-                    && item.cull_face_score < rk.reject_face_score_threshold)
+                || item.weak_face
         })
         .collect();
     let winner_index = rejects.iter().position(|r| !r);
@@ -1091,6 +1119,11 @@ pub fn group_and_sort_images_with_config(
                 exposure_bias: r.metadata.get("exposure_bias").and_then(Value::as_f64),
                 phash: r.phash,
                 embedding: effective_embedding(&r.embedding),
+                faces: r
+                    .metadata
+                    .get("cull_face_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize,
                 sharp_region: match (
                     r.metadata
                         .get("cull_sharp_region_x")
@@ -1374,6 +1407,71 @@ mod tests {
         let groups =
             group_and_sort_images_with_config(vec![shallow, busy], None, None, Some(1), &cfg);
         assert_eq!(winner_of(&groups), "busy");
+    }
+
+    /// The real-shoot failure: on small faces the eye proxy reads "closed" on
+    /// every frame (0.07–0.26 across a whole baptism), and occlusion and the
+    /// face score sit past their thresholds just as uniformly. Under the
+    /// absolute rules every non-pick of such a burst is a clear defect and a
+    /// reject candidate; under the relative rules a frame is only a blink,
+    /// occluded or weak-faced when it reads clearly worse than its siblings.
+    #[test]
+    fn uniformly_poor_face_proxies_do_not_reject_a_whole_burst() {
+        let hash = Some(0xffff_ffff_ffff_ffff);
+        let frame = |id: &str, t: f64, eye: f64, occlusion: f64| {
+            let mut r = with_metrics(
+                rec(id, Some(t), hash),
+                &[
+                    ("cull_sharpness", 0.5),
+                    ("cull_sharpness_peak", 0.5),
+                    ("cull_exposure", 0.7),
+                    ("cull_noise", 0.1),
+                    ("cull_face_score", 0.25),
+                    ("cull_face_sharpness", 0.4),
+                    ("cull_eye_openness", eye),
+                    ("cull_blink_penalty", 1.0 - eye),
+                    ("cull_occlusion", occlusion),
+                ],
+            );
+            // Read as an integer by ranking, so it must be stored as one.
+            r.metadata.insert("cull_face_count".into(), Value::from(3));
+            r
+        };
+        // Every frame reads as a blink (penalty 0.85 > 0.75), obstructed
+        // (0.80 > 0.75) and weak-faced (0.25 < 0.30) under the absolute rules.
+        let burst = vec![
+            frame("a", 1000.0, 0.15, 0.80),
+            frame("b", 1000.5, 0.14, 0.80),
+            frame("c", 1001.0, 0.15, 0.80),
+        ];
+        let groups = run(burst.clone());
+        assert_eq!(groups.len(), 1);
+        assert!(
+            groups[0].reject_candidate_photo_ids.is_empty(),
+            "nothing is clearly worse than its siblings: {:?}",
+            groups[0].reject_candidate_photo_ids
+        );
+        assert!(groups[0]
+            .photos
+            .iter()
+            .all(|p| p.metrics["clear_defect"] == false));
+
+        // ...but a frame whose eyes are visibly less open than the best, or
+        // whose face is visibly more obstructed, still is.
+        let mut worse = burst.clone();
+        worse.push(frame("blink", 1001.5, 0.02, 0.80));
+        worse.push(frame("covered", 1002.0, 0.15, 0.95));
+        let groups = run(worse);
+        let rejects = &groups[0].reject_candidate_photo_ids;
+        assert!(rejects.contains(&"blink".to_string()), "{rejects:?}");
+        assert!(rejects.contains(&"covered".to_string()), "{rejects:?}");
+        assert!(!rejects.contains(&"a".to_string()), "{rejects:?}");
+
+        // The absolute rules are what the Python port pinned.
+        let mut cfg = get_culling_config("default");
+        cfg.ranking.relative_defect_rules = false;
+        let groups = group_and_sort_images_with_config(burst, None, None, Some(1), &cfg);
+        assert_eq!(groups[0].reject_candidate_photo_ids.len(), 2);
     }
 
     /// Two frames of one scene, differing only in focus. The frame-wide noise

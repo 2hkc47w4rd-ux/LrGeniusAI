@@ -848,6 +848,10 @@ function SearchIndexAPI.analyzeAndIndexPhotoByReference(photoId, filePath, optio
 			{
 				path = filePath,
 				photo_id = photoId,
+				-- Same per-photo fields the grouped variant forwards; the
+				-- capture time is what burst grouping runs on.
+				date_time = options.date_time,
+				date_time_unix = options.date_time_unix,
 				exposure_bias = options.exposure_bias,
 				is_raw = options.is_raw,
 			},

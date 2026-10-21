@@ -955,6 +955,63 @@ window gained an `Auto (from preset)` choice that leaves `time_delta_seconds`
 out of the request so the preset windows — dead for a long time, then
 restored on the backend — finally reach a cull started from the dialog.
 
+## First real shoot
+
+The first cull of a real shoot — a baptism, 797 NEF frames, Event preset at
+the gentle strength — on the day the Lightroom workflow landed. It did what
+the synthetic fixtures could not: it showed where the signals meet real
+photographs. The numbers, then what changed.
+
+| what the run said | number |
+|---|---|
+| groups | 155 (one of 123 frames, others of 45, 44, 40, 28) |
+| picks / alternates / reject candidates | 103 / 27 / **667** |
+| reject candidates with `clear_defect` | 666 of 667 |
+| `possible_blink` on rejects | 653 |
+| `possible_occlusion` on rejects | 567 |
+| frames with faces whose `blink_penalty` exceeded the Event reject threshold | 767 of 769 |
+| "focus stacks" found, frames kept | 7, 27 — every one a group of 3 to 10 people |
+| `time_span_seconds` of every group | 0 |
+
+**The fast prep path sent no capture time.** `TaskCullPhotos.lua`'s
+`indexOptionsFor` forwarded `exposure_bias` and the filename and nothing else,
+so every photo it prepared was undated to the backend, the sliding-window
+grouper treated the whole selection as the "undated suffix" and matched by
+hash and embedding alone, and a ceremony of similar frames chained into one
+group of 123 with a single pick. Fixed three ways, so it cannot come back:
+the prep path now sends `date_time`/`date_time_unix` like Analyze & Index
+(and the single-photo by-reference wrapper forwards them, which it never did),
+the backend falls back to the file's EXIF `DateTimeOriginal`
+(`lrg_imaging::capture::read_capture_time`) when the plugin sends nothing,
+and `/index/unprocessed` reports a cull-prepared photo without a
+`capture_time` as still needing preparation — once, since a photo that has
+none anywhere is stamped `capture_time_unknown`.
+
+**The face proxies fire on everything.** Eye openness read 0.07–0.26 across
+the whole shoot: the patch it is measured on is clamped to 8 px and the faces
+at a ceremony are small, so every frame "blinked", most were "occluded" and
+nearly all had a face score under the reject threshold. Each absolute rule was
+individually reasonable; together they made every non-pick of every burst a
+clear defect. The fix is not a new threshold — no threshold is right for a
+proxy that cannot see the eye — but `ranking.relative_defect_rules`: blink,
+occlusion and weak-face now also have to be clearly worse than the group's
+best frame (`relative_defect_margin`, 0.10) before they count. A proxy that
+reads the same on every frame of a burst then rejects nothing, while a frame
+that reads clearly worse than its siblings still does. The outstanding
+eye-state classifier (item 1 above) remains the real answer; this makes the
+proxy honest about what it can and cannot distinguish in the meantime.
+
+**People are not focus stacks.** Static framing plus a wandering sharp region
+is how a stack is recognised, and it is also what a group of people shifting
+their weight between frames looks like. `SetFrame::faces` now carries
+`cull_face_count`, and a group with a face in any frame is never a stack.
+
+The first run's flag writing, undo, respect-existing protection and
+collections all behaved as designed: 96 picks flagged (103 picks minus the 7
+"stacks", which are never flagged), 49 purple labels, 0 rejects (as
+configured), confirmed by reading the catalog. The second run, after these
+fixes, is what the numbers above should be compared against.
+
 ### Also fixed on the way past
 
 `sync_translations.py` had two bugs that were corrupting shipped UI strings:
