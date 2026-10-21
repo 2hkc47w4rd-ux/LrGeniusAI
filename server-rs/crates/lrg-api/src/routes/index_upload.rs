@@ -1489,6 +1489,10 @@ async fn prepare_one(
         "cull_motion_anisotropy".into(),
         json!(metrics.cull_motion_anisotropy),
     );
+    // Noise measured only where the frame is flat. Ranking prefers it to
+    // `cull_noise`, whose high-pass residual reads detail as grain; rows
+    // without it rank on the frame-wide number until re-indexed.
+    main_metadata.insert("cull_noise_flat".into(), json!(metrics.cull_noise_flat));
     if !phash.is_empty() {
         main_metadata.insert("cull_phash".into(), json!(phash));
         main_metadata.insert("phash".into(), json!(phash));

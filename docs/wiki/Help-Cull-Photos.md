@@ -42,14 +42,56 @@ photos, so it works best on frames shot with AEB.
 3. Choose:
    - **Apply to** – `Selected photos only` or `Current view`.
    - **Burst time window (seconds)** – how far apart two frames may be and
-     still count as the same burst.
+     still count as the same burst. `Auto (from preset)` uses the preset's
+     own window: 1 s for Default, Portrait and Street, 2 s for Event, 3 s for
+     Sports.
    - **Culling preset** – tunes thresholds and weights:
      `Default (sharpness, exposure, faces)`, `Portrait (faces and expression)`,
      `Street (candid moments)`, `Event (people, emotion, moments)`,
      `Sports (action and emotion)`. Every preset except Default also judges
      the moment; see below.
+   - **Cull strength** – how many near-misses become reject candidates.
+     `Gentle` keeps more alternates, `Strict` aims for one keeper per burst,
+     `Balanced` is the preset's own margin. It only moves the score margin:
+     a blurred frame, a blink or a blocked face is rejected at the same
+     threshold whatever you choose.
    - **Create 'Duplicates / Near Duplicates' collection** – on by default.
+   - **Lightroom flags and ratings** – see the next section.
 4. Start the task and wait until the progress dialog completes.
+
+## Flags, stars and labels in Lightroom
+
+Collections are good for review; flags are what you cull *with*. The
+**Lightroom flags and ratings** box writes the result the way you would by
+hand, so the Library filter bar, the flag shortcuts and
+**Photo → Delete Rejected Photos** all work on it directly:
+
+- **Flag picks (P)** – the best usable frame of every group gets the Pick
+  flag. On by default.
+- **Flag reject candidates as rejected (X)** – reject candidates get the
+  Reject flag. Off by default, because that flag is one menu command away
+  from deleting files; turn it on once you trust the preset on your work.
+  Nothing is ever deleted by the plugin.
+- **Star ratings** – picks 3 stars, alternates 2 stars. Reject candidates
+  get no stars; the flag is their mark. Off by default.
+- **Purple label on "look before deleting" rejects** – a reject candidate
+  that had its group's strongest moment but a technical flaw is labelled
+  purple, so it stands out in the grid before you delete rejects. On by
+  default.
+- **Leave photos I have already flagged, rated or labelled alone** – on by
+  default. A photo that already carries a flag keeps it, one with stars
+  keeps them, one with a colour label keeps it, and the completion dialog
+  says how many were protected. Switch it off to re-cull from scratch: the
+  run then overwrites earlier marks and unflags alternates that still carry
+  a flag from an earlier run.
+
+Everything the run writes is one history step, so **Cmd/Ctrl+Z** takes it all
+back. Frames of an exposure bracket, focus stack or panorama are never flagged
+or rated.
+
+The result collections are filled in review order: `Picks` and `Alternates`
+best first, `Reject Candidates` worst first. Set the collection's sort to
+**Custom Order** to see it.
 
 The plugin calls the backend culling endpoint, which:
 
@@ -126,8 +168,10 @@ You can safely rename or move these collections later; they are standard Lightro
 ### When the run finishes
 
 The completion dialog counts the groups, picks, alternates, reject candidates
-and near-duplicate groups, and names the preset used. Two lines appear only
-when they apply:
+and near-duplicate groups, and names the preset used. When flags, stars or
+labels were written it says how many of each, and how many were left alone
+because you had set them yourself. Two more lines appear only when they
+apply:
 
 - how many groups were recognised as brackets, stacks or panoramas, and that
   every frame in them was kept
@@ -144,7 +188,10 @@ For each photo, the backend stores culling-related fields such as:
 
 - group information: `cull_group_id`, `cull_group_type`, `cull_group_rank`, `cull_group_winner`
 - technical scores: `cull_sharpness`, `cull_sharpness_peak`, `cull_exposure`,
-  `cull_highlight_clip`, `cull_shadow_clip`, `cull_noise`,
+  `cull_highlight_clip`, `cull_shadow_clip`, `cull_noise`, `cull_noise_flat`
+  (noise measured only where the frame is smooth, so fine detail no longer
+  reads as grain; ranking prefers it to `cull_noise`, and photos indexed
+  before it existed rank on `cull_noise` until re-indexed),
   `cull_motion_anisotropy` (camera shake vs. subject motion),
   `cull_sharp_region_x` / `cull_sharp_region_y` (where in the frame the
   sharpness actually sits, so a sharp background does not win over a sharp

@@ -229,7 +229,12 @@ struct Scored<'a> {
     /// unusable however strong its moment, because no edit repairs them.
     hard_defect: bool,
     cull_exposure: f64,
+    /// The noise penalty the score uses: `cull_noise_flat` when the row has
+    /// it, else the frame-wide `cull_noise`.
     cull_noise: f64,
+    /// The frame-wide estimate, kept only when the flat-region one was used
+    /// in its place, so the response can show both when they disagree.
+    cull_noise_frame_wide: Option<f64>,
     cull_highlight_clip: f64,
     cull_shadow_clip: f64,
     cull_technical_score: f64,
@@ -359,10 +364,16 @@ fn rank_group_records(
             // The stated reason for normalizing it does not survive contact
             // either: a whole group shot at the same high ISO is penalised
             // *equally*, and a constant offset cannot change a within-group
-            // ranking. Relative noise buys nothing and costs this. Fixing the
-            // estimator so it stops competing with sharpness is real work and
-            // stays on the outstanding list.
-            let noise_penalty = metric(m, "cull_noise", 1.0);
+            // ranking. Relative noise buys nothing and costs this.
+            //
+            // The fix is `cull_noise_flat`: the same residual, measured only
+            // where the smoothed frame carries no gradient, so detail no
+            // longer reads as grain. Preferred whenever the row has it; rows
+            // indexed before it existed fall back to the frame-wide number,
+            // and both are reported so a disagreement between them is visible.
+            let noise_frame_wide = metric(m, "cull_noise", 1.0);
+            let noise_flat = m.get("cull_noise_flat").and_then(Value::as_f64).map(unit);
+            let noise_penalty = noise_flat.unwrap_or(noise_frame_wide);
             let highlight_clip = metric(m, "cull_highlight_clip", 0.0);
             let shadow_clip = metric(m, "cull_shadow_clip", 0.0);
             let clipping_penalty = unit(highlight_clip + shadow_clip);
@@ -447,6 +458,7 @@ fn rank_group_records(
                 hard_defect: false,
                 cull_exposure: exposure,
                 cull_noise: noise_penalty,
+                cull_noise_frame_wide: noise_flat.map(|_| noise_frame_wide),
                 cull_highlight_clip: highlight_clip,
                 cull_shadow_clip: shadow_clip,
                 cull_technical_score: technical_score,
@@ -747,6 +759,11 @@ fn rank_group_records(
         metrics.insert("sharpness".into(), Value::from(round4(item.cull_sharpness)));
         metrics.insert("exposure".into(), Value::from(round4(item.cull_exposure)));
         metrics.insert("noise".into(), Value::from(round4(item.cull_noise)));
+        // Present only when `noise` came from the flat-region estimate, so a
+        // reader can see what the frame-wide residual would have said.
+        if let Some(frame_wide) = item.cull_noise_frame_wide {
+            metrics.insert("noise_frame_wide".into(), Value::from(round4(frame_wide)));
+        }
         metrics.insert(
             "highlight_clip".into(),
             Value::from(round4(item.cull_highlight_clip)),
@@ -1357,6 +1374,57 @@ mod tests {
         let groups =
             group_and_sort_images_with_config(vec![shallow, busy], None, None, Some(1), &cfg);
         assert_eq!(winner_of(&groups), "busy");
+    }
+
+    /// Two frames of one scene, differing only in focus. The frame-wide noise
+    /// residual reads the sharp frame's detail as grain (0.08 vs 0.01 measured
+    /// on real frames), so on that signal alone the *soft* frame looks
+    /// cleaner. With `cull_noise_flat` present, ranking must read it instead,
+    /// and report the frame-wide number alongside so the disagreement shows.
+    #[test]
+    fn flat_region_noise_is_preferred_over_the_frame_wide_residual() {
+        let hash = Some(0xffff_ffff_ffff_ffff);
+        // Sharpness is held equal so that noise is the only thing deciding.
+        let sharp_detail = with_metrics(
+            rec("sharp_detail", Some(1000.0), hash),
+            &[
+                ("cull_sharpness", 0.6),
+                ("cull_sharpness_peak", 0.6),
+                ("cull_exposure", 0.7),
+                ("cull_noise", 0.95),
+                ("cull_noise_flat", 0.05),
+            ],
+        );
+        let soft_detail = with_metrics(
+            rec("soft_detail", Some(1000.5), hash),
+            &[
+                ("cull_sharpness", 0.6),
+                ("cull_sharpness_peak", 0.6),
+                ("cull_exposure", 0.7),
+                ("cull_noise", 0.15),
+                ("cull_noise_flat", 0.60),
+            ],
+        );
+        let groups = run(vec![sharp_detail, soft_detail]);
+        assert_eq!(winner_of(&groups), "sharp_detail");
+        let winner = &groups[0].photos[0];
+        assert_eq!(winner.metrics["noise"], 0.05);
+        assert_eq!(winner.metrics["noise_frame_wide"], 0.95);
+
+        // Rows indexed before the flat estimate existed rank on the frame-wide
+        // value and do not pretend otherwise.
+        let legacy = with_metrics(
+            rec("legacy", Some(2000.0), hash),
+            &[
+                ("cull_sharpness", 0.6),
+                ("cull_exposure", 0.7),
+                ("cull_noise", 0.3),
+            ],
+        );
+        let groups = run(vec![legacy]);
+        let only = &groups[0].photos[0];
+        assert_eq!(only.metrics["noise"], 0.3);
+        assert!(only.metrics.get("noise_frame_wide").is_none());
     }
 
     /// A three-stop bracket must come back with every frame kept. Before set

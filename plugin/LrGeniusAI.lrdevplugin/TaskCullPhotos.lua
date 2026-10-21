@@ -8,6 +8,15 @@ local function showCullDialog(ctx)
 	props.timeDeltaSeconds = prefs.cullTimeDeltaSeconds or 2
 	props.cullingPreset = prefs.cullPreset or "default"
 	props.createDuplicatesCollection = prefs.cullCreateDuplicatesCollection ~= false
+	props.cullStrength = prefs.cullStrength or "balanced"
+	-- Flags are what a photographer culls *with*, so picks are flagged by
+	-- default; rejects are opt-in because a reject flag is one menu command
+	-- away from deleting files. Both honour existing flags unless told not to.
+	props.flagPicks = prefs.cullFlagPicks ~= false
+	props.flagRejects = prefs.cullFlagRejects == true
+	props.respectExistingFlags = prefs.cullRespectExistingFlags ~= false
+	props.rateByDecision = prefs.cullRateByDecision == true
+	props.labelStrongMoment = prefs.cullLabelStrongMoment ~= false
 
 	local contents = f:column({
 		bind_to_object = props,
@@ -41,12 +50,32 @@ local function showCullDialog(ctx)
 				f:combo_box({
 					value = bind("timeDeltaSeconds"),
 					items = {
+						{ title = "Auto (from preset)", value = "auto" },
 						{ title = "1", value = 1 },
 						{ title = "2", value = 2 },
 						{ title = "3", value = 3 },
 						{ title = "5", value = 5 },
 					},
-					width = 120,
+					width = 160,
+					tooltip = "Auto uses the preset's own window: 1 s for Default, Portrait and Street, "
+						.. "2 s for Event, 3 s for Sports.",
+				}),
+			}),
+			f:row({
+				f:static_text({
+					title = "Cull strength:",
+					width = share("labelWidth"),
+				}),
+				f:popup_menu({
+					value = bind("cullStrength"),
+					items = {
+						{ title = "Gentle (keep more alternates)", value = "gentle" },
+						{ title = "Balanced", value = "balanced" },
+						{ title = "Strict (one keeper per burst where possible)", value = "strict" },
+					},
+					width = 260,
+					tooltip = "How far below the pick a frame must score to become a reject candidate. "
+						.. "Blur, blinks and blocked faces are rejected at the same thresholds whatever you choose.",
 				}),
 			}),
 			f:row({
@@ -85,6 +114,40 @@ local function showCullDialog(ctx)
 				),
 			}),
 		}),
+		f:group_box({
+			title = "Lightroom flags and ratings",
+			fill_horizontal = 1,
+			f:checkbox({
+				value = bind("flagPicks"),
+				title = "Flag picks (P)",
+				tooltip = "Sets the Pick flag on the best usable frame of every group.",
+			}),
+			f:checkbox({
+				value = bind("flagRejects"),
+				title = "Flag reject candidates as rejected (X)",
+				tooltip = "Sets the Reject flag on reject candidates. Nothing is deleted: "
+					.. "Photo > Delete Rejected Photos is still your decision.",
+			}),
+			f:checkbox({
+				value = bind("rateByDecision"),
+				title = "Star ratings: picks 3 stars, alternates 2 stars",
+				tooltip = "Reject candidates get no stars; the reject flag is their mark.",
+			}),
+			f:checkbox({
+				value = bind("labelStrongMoment"),
+				title = "Purple label on rejects with the group's strongest moment ('look before deleting')",
+			}),
+			f:checkbox({
+				value = bind("respectExistingFlags"),
+				title = "Leave photos I have already flagged, rated or labelled alone",
+				tooltip = "Off: this run overwrites earlier flags, stars and labels, and unflags alternates "
+					.. "that still carry a flag from an earlier run. Everything is one undo step either way.",
+			}),
+			f:static_text({
+				title = "Brackets, focus stacks and panoramas are never flagged or rated.",
+				text_color = LrColor(0.5, 0.5, 0.5),
+			}),
+		}),
 	})
 
 	local result = LrDialogs.presentModalDialog({
@@ -102,13 +165,66 @@ local function showCullDialog(ctx)
 	prefs.cullTimeDeltaSeconds = props.timeDeltaSeconds
 	prefs.cullPreset = props.cullingPreset
 	prefs.cullCreateDuplicatesCollection = props.createDuplicatesCollection
+	prefs.cullStrength = props.cullStrength
+	prefs.cullFlagPicks = props.flagPicks
+	prefs.cullFlagRejects = props.flagRejects
+	prefs.cullRespectExistingFlags = props.respectExistingFlags
+	prefs.cullRateByDecision = props.rateByDecision
+	prefs.cullLabelStrongMoment = props.labelStrongMoment
 
 	return {
 		scope = props.scope,
 		timeDeltaSeconds = props.timeDeltaSeconds,
 		cullingPreset = props.cullingPreset,
 		createDuplicatesCollection = props.createDuplicatesCollection,
+		cullStrength = props.cullStrength,
+		flagPicks = props.flagPicks,
+		flagRejects = props.flagRejects,
+		respectExistingFlags = props.respectExistingFlags,
+		rateByDecision = props.rateByDecision,
+		labelStrongMoment = props.labelStrongMoment,
 	}
+end
+
+---
+-- What the catalog holds now for the photos a cull touched: flag, stars and
+-- colour label, by photo ID. `Util.cullFlagPlan` needs it to leave the
+-- photographer's own decisions alone.
+--
+-- One batched read; falls back to per-photo reads if the batch call fails, as
+-- `PhotoSelector` does, so a read error degrades to slower rather than to
+-- "no flags applied".
+-- @return table photoId -> { pickStatus, rating, colorNameForLabel }
+local function currentFlagsByPhotoId(catalog, photoById)
+	local photos = {}
+	local idByPhoto = {}
+	for photoId, photo in pairs(photoById) do
+		table.insert(photos, photo)
+		idByPhoto[photo] = photoId
+	end
+	local keys = { "pickStatus", "rating", "colorNameForLabel" }
+	local current = {}
+	local ok, batch = LrTasks.pcall(function()
+		return catalog:batchGetRawMetadata(photos, keys)
+	end)
+	if ok and type(batch) == "table" then
+		for photo, values in pairs(batch) do
+			local photoId = idByPhoto[photo]
+			if photoId and type(values) == "table" then
+				current[photoId] = values
+			end
+		end
+		return current
+	end
+	log:warn("batchGetRawMetadata failed before applying cull flags; reading per photo: " .. tostring(batch))
+	for photoId, photo in pairs(photoById) do
+		current[photoId] = {
+			pickStatus = photo:getRawMetadata("pickStatus"),
+			rating = photo:getRawMetadata("rating"),
+			colorNameForLabel = photo:getRawMetadata("colorNameForLabel"),
+		}
+	end
+	return current
 end
 
 local function dedupePhotoIds(photoIds)
@@ -505,6 +621,7 @@ LrTasks.startAsyncTask(function()
 			clip_threshold = "auto",
 			time_delta_seconds = options.timeDeltaSeconds,
 			culling_preset = options.cullingPreset,
+			reject_margin_scale = Util.cullRejectMarginScale(options.cullStrength),
 		})
 		local groups = cullResult and cullResult.groups or nil
 		local summary = (cullResult and cullResult.summary) or {}
@@ -588,6 +705,14 @@ LrTasks.startAsyncTask(function()
 			end
 		end
 
+		-- Collections are review queues, so they are filled in score order:
+		-- picks and alternates best first, reject candidates worst first.
+		-- Lightroom shows that order under the Custom Order sort.
+		local scores = Util.cullScoresById(groups)
+		picksIds = Util.cullSortByScore(picksIds, scores)
+		alternateIds = Util.cullSortByScore(alternateIds, scores)
+		rejectIds = Util.cullSortByScore(rejectIds, scores, true)
+
 		-- Photo IDs the backend grouped but this catalog no longer has. They are
 		-- collected rather than only logged, so the completion dialog can say
 		-- how much of the selection the collections are missing (#375).
@@ -614,14 +739,12 @@ LrTasks.startAsyncTask(function()
 			for _, photoResult in ipairs(groupPhotos) do
 				local photoId = photoResult["photo_id"]
 				if photoId then
-					local decision = "alternate"
-					if photoResult["winner"] then
-						decision = "pick"
-					elseif photoResult["reject_candidate"] then
-						decision = "reject_candidate"
-						if Util.table_contains(photoResult["reason_codes"] or {}, "strong_moment_but_unusable") then
-							strongMomentRejects = strongMomentRejects + 1
-						end
+					local decision = Util.cullDecisionOf(photoResult)
+					if
+						decision == "reject_candidate"
+						and Util.table_contains(photoResult["reason_codes"] or {}, "strong_moment_but_unusable")
+					then
+						strongMomentRejects = strongMomentRejects + 1
 					end
 					cullDataByPhotoId[photoId] = {
 						decision = decision,
@@ -646,6 +769,51 @@ LrTasks.startAsyncTask(function()
 				end
 			end
 		end, Defaults.catalogWriteAccessOptions)
+
+		-- Flags, stars and labels: the result in the form a photographer culls
+		-- with, so the filter bar and Photo > Delete Rejected Photos work on it
+		-- directly. One write-access block, so one Cmd/Ctrl+Z undoes the lot.
+		-- The plan is computed first, from what the catalog holds now, so that
+		-- the photographer's own flags survive a re-run.
+		local flagCounts
+		local flagsFailed
+		if options.flagPicks or options.flagRejects or options.rateByDecision or options.labelStrongMoment then
+			local current = currentFlagsByPhotoId(catalog, photoById)
+			local plan
+			plan, flagCounts = Util.cullFlagPlan(groups, {
+				flagPicks = options.flagPicks,
+				flagRejects = options.flagRejects,
+				respectExisting = options.respectExistingFlags,
+				rateByDecision = options.rateByDecision,
+				labelStrongMoment = options.labelStrongMoment,
+			}, current)
+			local hasChanges = next(plan) ~= nil
+			if hasChanges then
+				local ok, writeErr = LrTasks.pcall(function()
+					catalog:withWriteAccessDo("Apply culling flags and ratings", function()
+						for photoId, change in pairs(plan) do
+							local photo = photoById[photoId]
+							if photo then
+								if change.pickStatus ~= nil then
+									photo:setRawMetadata("pickStatus", change.pickStatus)
+								end
+								if change.rating ~= nil then
+									photo:setRawMetadata("rating", change.rating)
+								end
+								if change.colorNameForLabel ~= nil then
+									photo:setRawMetadata("colorNameForLabel", change.colorNameForLabel)
+								end
+							end
+						end
+					end, Defaults.catalogWriteAccessOptions)
+				end)
+				if not ok then
+					flagsFailed = tostring(writeErr)
+					flagCounts = nil
+					log:error("Applying cull flags failed: " .. flagsFailed)
+				end
+			end
+		end
 
 		catalog:withWriteAccessDo("Create culling collections", function()
 			resultSet = catalog:createCollectionSet(
@@ -715,6 +883,17 @@ LrTasks.startAsyncTask(function()
 					"%d reject candidate(s) had the strongest moment of their group but a technical flaw such as blur. Look at them before deleting: the reason is under 'Culling explanation' in the Metadata panel.",
 					strongMomentRejects
 				)
+		end
+
+		for _, line in ipairs(Util.cullFlagSummaryLines(flagCounts)) do
+			completionMessage = completionMessage .. "\n\n" .. line
+		end
+		if flagsFailed then
+			completionMessage = completionMessage
+				.. "\n\n"
+				.. "The flags, ratings and labels could not be written: "
+				.. flagsFailed
+				.. "\nThe collections above are complete; apply the flags from them by hand or run the cull again."
 		end
 
 		-- Photos that fell out of the run rather than being culled: no usable

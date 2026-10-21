@@ -1111,6 +1111,73 @@ async fn cull_returns_summary_and_group_shape_the_plugin_reads() {
     assert!(winner["metrics"].is_object());
 }
 
+/// `reject_margin_scale` is the plugin's "how hard to cull" control. The seeded
+/// burst's scores sit ~0.047 apart per frame, under the default 0.18 margin,
+/// so nothing is rejected until the margin is scaled down — and then the
+/// frames fall one by one, furthest from the pick first.
+#[tokio::test]
+async fn cull_reject_margin_scale_moves_the_score_margin_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path_str = dir.path().join("lrgenius.db").to_str().unwrap().to_string();
+    let (app, state) = fresh_app();
+    state.ensure_db_path(&db_path_str).await.unwrap();
+    seed_burst(&state, 3, true).await;
+
+    let rejects = |scale: Option<f64>| {
+        let app = app.clone();
+        let db = db_path_str.clone();
+        async move {
+            let mut body = serde_json::json!({
+                "photo_ids": ["burst0", "burst1", "burst2"],
+                "db_path": db,
+            });
+            if let Some(scale) = scale {
+                body["reject_margin_scale"] = serde_json::json!(scale);
+            }
+            let json = cull_request(app, body).await;
+            assert_eq!(json["groups"][0]["winner_photo_id"], "burst0");
+            json["summary"]["reject_candidate_count"].as_u64().unwrap()
+        }
+    };
+
+    assert_eq!(rejects(None).await, 0, "preset margin: a gentle cull");
+    assert_eq!(
+        rejects(Some(1.0)).await,
+        0,
+        "1.0 is the preset's own margin"
+    );
+    assert_eq!(
+        rejects(Some(0.5)).await,
+        1,
+        "half the margin takes the weakest frame"
+    );
+    assert_eq!(
+        rejects(Some(0.25)).await,
+        2,
+        "a quarter leaves only the pick"
+    );
+    // Out-of-range values are clamped, not refused: 0 would mean 0.25.
+    assert_eq!(rejects(Some(0.0)).await, 2);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/cull/grade")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "photo_ids": ["burst0"],
+                        "db_path": db_path_str,
+                        "reject_margin_scale": "wide",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn cull_omits_debug_block_unless_requested() {
     let dir = tempfile::tempdir().unwrap();

@@ -505,7 +505,9 @@ inline in a sequential loop.
 Ordered by value. Items 1, 2, 4, 5, 6 and 10 of the original list are done —
 see [Signal-quality pass](#signal-quality-pass) below, and
 [Moment scoring](#moment-scoring-for-action-work) for the follow-up that came
-out of a real complaint about a soccer series.
+out of a real complaint about a soccer series. Item 2 of *this* list (the
+noise estimator) is done too — see
+[Flat-region noise and the Lightroom workflow](#flat-region-noise-and-the-lightroom-workflow).
 
 1. **A real eye-state classifier.** `blink_penalty` is still exactly
    `1 - eye_openness`, and the underlying signal is a mean vertical gradient in
@@ -878,6 +880,80 @@ Two details that matter:
 
 No photographs leave the machine — a fixture holds measurements, capture times,
 hashes and opaque ids.
+
+## Flat-region noise and the Lightroom workflow
+
+Two gaps closed in one pass: the one signal that was known to point the wrong
+way, and the fact that a cull ended in collections rather than in the flags a
+photographer actually culls with.
+
+### `cull_noise_flat`
+
+Outstanding item 2 above. The frame-wide estimate is the mean 3×3 box-blur
+residual over mid-tone pixels; detail is high-pass energy too, so it scored a
+sharp frame 0.082 and the blurred frame of the same scene 0.012 and could
+never be normalised against the group. `lrg_imaging::metrics` now also
+accumulates the residual only where the **smoothed** image has no gradient
+(`noise_flat_gradient_threshold`, 0.02 per pixel), so texture and edges are
+left out and what remains is tone plus noise. The gradient is taken on the
+smoothed plane rather than the raw one so the noise under test cannot push
+its own pixels out of the mask. When less than `noise_flat_min_fraction` of
+the interior is flat (a frame that is texture edge to edge) the field equals
+`cull_noise`, so a row always carries it.
+
+Stored as `cull_noise_flat`, normalised by `noise_flat_denominator` (0.04,
+lower than the frame-wide 0.08 because a residual measured only on smooth
+pixels is a smaller number). `rank_group_records` reads it in preference to
+`cull_noise` and reports the frame-wide value alongside as `noise_frame_wide`
+so a disagreement is visible. `cull_noise` itself is unchanged, bit for bit,
+so the imaging goldens still pin the Python port. Unit tests cover the three
+cases that matter: two frames of one scene differing only in focus score the
+same flat noise while the frame-wide value still prefers the soft one; grain
+added to either raises it; and a frame with nothing flat falls back.
+
+Rows indexed before this shipped have no `cull_noise_flat` and rank on the
+frame-wide number until re-indexed — the same migration story as
+`cull_sharpness_peak`.
+
+### `reject_margin_scale`
+
+`/cull/grade` takes `reject_margin_scale`, a factor on the preset's
+`reject_score_delta`, clamped to 0.25..4. The presets say what a good frame
+of a genre looks like; how many near-misses to keep is the photographer's
+call and changes from job to job (one frame per burst for a client gallery,
+three for an album edit), so it is a dialog setting — **Cull strength**:
+gentle 1.5, balanced 1.0, strict 0.6 — rather than a preset. It moves only the
+score-margin rule. The defect rules (blur, blink, occlusion, exposure) fire at
+their usual thresholds, because a blink is a blink however gentle the cull.
+A contract test pins the ladder on the seeded three-frame burst: 0 rejects at
+the preset margin, 1 at half, 2 at a quarter.
+
+### Flags, stars and labels
+
+The plugin can now write the result into the catalog the way a photographer
+would by hand, so the filter bar, the flag shortcuts and *Delete Rejected
+Photos* work on it: Pick flag on winners (default on), Reject flag on reject
+candidates (default off — one menu command from deleting files), 3/2 stars for
+picks/alternates (default off), and a purple label on
+`strong_moment_but_unusable` rejects (default on). All of it in one
+`withWriteAccessDo`, so one undo step.
+
+The piece that makes a re-run safe is `Util.cullFlagPlan`: a pure function
+over the backend result and what the catalog holds now
+(`batchGetRawMetadata` for `pickStatus`, `rating`, `colorNameForLabel`). With
+*respect existing* on (the default) a photo the photographer already flagged,
+rated or labelled is left alone and counted, so their decisions always win
+over the machine's; with it off the run overwrites and also unflags alternates
+that still carry a flag from an earlier run, so the catalog reflects this run
+and not a mixture. `keep_all` groups are never touched. It is specced in
+`plugin/spec/util_cull_spec.lua`; the task only applies the plan and reports
+the counts.
+
+Result collections are now filled in score order (picks best first, rejects
+worst first), which Lightroom shows under Custom Order sort, and the burst
+window gained an `Auto (from preset)` choice that leaves `time_delta_seconds`
+out of the request so the preset windows — dead for a long time, then
+restored on the backend — finally reach a cull started from the dialog.
 
 ### Also fixed on the way past
 
