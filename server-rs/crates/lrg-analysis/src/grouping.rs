@@ -347,6 +347,17 @@ fn rank_group_records(
         .iter()
         .map(|r| metric(&r.metadata, "cull_exposure", 0.0))
         .collect();
+    // `cull_noise_flat` is read only when every frame of the group has it.
+    // The two estimators answer different questions (the frame-wide one reads
+    // detail as grain), so a group indexed half before and half after the
+    // flat one shipped must not compare one frame's grain with another's
+    // texture. All or nothing per group, like the moment.
+    let all_have_flat_noise = records.iter().all(|r| {
+        r.metadata
+            .get("cull_noise_flat")
+            .and_then(Value::as_f64)
+            .is_some()
+    });
 
     let mut scored: Vec<Scored> = records
         .iter()
@@ -383,7 +394,11 @@ fn rank_group_records(
             // indexed before it existed fall back to the frame-wide number,
             // and both are reported so a disagreement between them is visible.
             let noise_frame_wide = metric(m, "cull_noise", 1.0);
-            let noise_flat = m.get("cull_noise_flat").and_then(Value::as_f64).map(unit);
+            let noise_flat = if all_have_flat_noise {
+                m.get("cull_noise_flat").and_then(Value::as_f64).map(unit)
+            } else {
+                None
+            };
             let noise_penalty = noise_flat.unwrap_or(noise_frame_wide);
             let highlight_clip = metric(m, "cull_highlight_clip", 0.0);
             let shadow_clip = metric(m, "cull_shadow_clip", 0.0);
@@ -617,6 +632,7 @@ fn rank_group_records(
         // frame is a defect, as before.
         let blur_defect = item.sharpness_effective < rk.reason_blur_threshold
             && (!relative
+                || !rk.relative_blur_rule
                 || group_size == 1
                 || best_sharpness < rk.reason_blur_threshold
                 || item.sharpness_effective < best_sharpness - margin);
@@ -1555,7 +1571,7 @@ mod tests {
                 ("cull_noise_flat", 0.60),
             ],
         );
-        let groups = run(vec![sharp_detail, soft_detail]);
+        let groups = run(vec![sharp_detail.clone(), soft_detail]);
         assert_eq!(winner_of(&groups), "sharp_detail");
         let winner = &groups[0].photos[0];
         assert_eq!(winner.metrics["noise"], 0.05);
@@ -1571,10 +1587,28 @@ mod tests {
                 ("cull_noise", 0.3),
             ],
         );
-        let groups = run(vec![legacy]);
+        let groups = run(vec![legacy.clone()]);
         let only = &groups[0].photos[0];
         assert_eq!(only.metrics["noise"], 0.3);
         assert!(only.metrics.get("noise_frame_wide").is_none());
+
+        // ...and a group indexed half before and half after must compare all
+        // its frames on the same estimator: the flat value is read only when
+        // every frame has it, otherwise the frame-wide one for all.
+        let mut mixed_legacy = legacy;
+        mixed_legacy.capture_time = Some(1000.2);
+        let groups = run(vec![sharp_detail, mixed_legacy]);
+        assert_eq!(groups.len(), 1, "same burst");
+        for p in &groups[0].photos {
+            assert!(
+                p.metrics.get("noise_frame_wide").is_none(),
+                "{}",
+                p.photo_id
+            );
+        }
+        let by_id = |id: &str| groups[0].photos.iter().find(|p| p.photo_id == id).unwrap();
+        assert_eq!(by_id("sharp_detail").metrics["noise"], 0.95);
+        assert_eq!(by_id("legacy").metrics["noise"], 0.3);
     }
 
     /// A three-stop bracket must come back with every frame kept. Before set

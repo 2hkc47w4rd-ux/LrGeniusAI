@@ -904,8 +904,11 @@ the interior is flat (a frame that is texture edge to edge) the field equals
 Stored as `cull_noise_flat`, normalised by `noise_flat_denominator` (0.04,
 lower than the frame-wide 0.08 because a residual measured only on smooth
 pixels is a smaller number). `rank_group_records` reads it in preference to
-`cull_noise` and reports the frame-wide value alongside as `noise_frame_wide`
-so a disagreement is visible. `cull_noise` itself is unchanged, bit for bit,
+`cull_noise` — only when every frame of the group has it, since the two
+estimators answer different questions and a group indexed half before and
+half after must not compare one frame's grain with another's texture — and
+reports the frame-wide value alongside as `noise_frame_wide` so a
+disagreement is visible. `cull_noise` itself is unchanged, bit for bit,
 so the imaging goldens still pin the Python port. Unit tests cover the three
 cases that matter: two frames of one scene differing only in focus score the
 same flat noise while the frame-wide value still prefers the soft one; grain
@@ -939,15 +942,21 @@ picks/alternates (default off), and a purple label on
 `withWriteAccessDo`, so one undo step.
 
 The piece that makes a re-run safe is `Util.cullFlagPlan`: a pure function
-over the backend result and what the catalog holds now
-(`batchGetRawMetadata` for `pickStatus`, `rating`, `colorNameForLabel`). With
-*respect existing* on (the default) a photo the photographer already flagged,
-rated or labelled is left alone and counted, so their decisions always win
-over the machine's; with it off the run overwrites and also unflags alternates
-that still carry a flag from an earlier run, so the catalog reflects this run
-and not a mixture. `keep_all` groups are never touched. It is specced in
-`plugin/spec/util_cull_spec.lua`; the task only applies the plan and reports
-the counts.
+over the backend result, what the catalog holds now (`batchGetRawMetadata`
+for `pickStatus`, `rating`, `colorNameForLabel`) and what the last cull wrote
+(the `cullWritten` plugin field, `flag=1 rating=3 label=purple`, written in
+the same undo step as the marks). A mark equal to what the cull wrote is the
+cull's: it is refreshed to this run's decision or cleared when the decision
+no longer calls for it, so a re-run is never blocked by its own earlier
+output. Any other mark is the photographer's and is left alone and counted —
+unless *Also overwrite flags, stars and labels I set myself* is on, which is
+the only way a user mark is ever changed. (The first version keyed on "has a
+flag" alone, which could not tell the two apart: re-runs were blocked by
+their own picks and overwrite mode cleared the user's flags; review caught
+it.) `keep_all` groups are never touched. Every `with*WriteAccessDo` return
+value is checked, since a catalog that cannot be locked returns `"aborted"`
+without throwing. It is specced in `plugin/spec/util_cull_spec.lua`; the
+task only applies the plan and reports the counts.
 
 Result collections are now filled in score order (picks best first, rejects
 worst first), which Lightroom shows under Custom Order sort, and the burst
@@ -982,7 +991,10 @@ group of 123 with a single pick. Fixed three ways, so it cannot come back:
 the prep path now sends `date_time`/`date_time_unix` like Analyze & Index
 (and the single-photo by-reference wrapper forwards them, which it never did),
 the backend falls back to the file's EXIF `DateTimeOriginal`
-(`lrg_imaging::capture::read_capture_time`) when the plugin sends nothing,
+(`lrg_imaging::capture::read_capture_time`, with `SubSecTimeOriginal` for the
+fraction — at 20–30 fps a burst shares one whole second — and
+`OffsetTimeOriginal` so the value is a real epoch, as `local_hour` assumes)
+when the plugin sends nothing,
 and `/index/unprocessed` reports a cull-prepared photo without a
 `capture_time` as still needing preparation — once, since a photo that has
 none anywhere is stamped `capture_time_unknown`.
@@ -1011,7 +1023,12 @@ relative rules — a frame with siblings is a blur defect when clearly softer
 than the sharpest of them, a single or a burst whose sharpest frame is itself
 soft keeps the absolute test, so a burst that missed focus throughout is
 still rejected whole — and occlusion got its own margin,
-`relative_occlusion_margin` (0.20, about half the proxy's range).
+`relative_occlusion_margin`. **Both are held pending calibration**, at the
+maintainers' request: `relative_blur_rule` defaults to off and the occlusion
+margin to the shared 0.10, so shipped behaviour is that of the second run.
+The measured candidates (blur on, occlusion 0.20) gave 415 of 770 at gentle
+and are what `cull_eval --ablate` should test once a hand-culled fixture
+exists for more than one genre.
 
 **People are not focus stacks.** Static framing plus a wandering sharp region
 is how a stack is recognised, and it is also what a group of people shifting

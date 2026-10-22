@@ -3110,31 +3110,82 @@ function Util.cullSortByScore(ids, scores, worstFirst)
 end
 
 ---
+-- Encodes what a cull wrote on a photo, for the `cullWritten` plugin field:
+-- `flag=1 rating=3 label=purple`, fields the cull does not own left out.
+-- Empty string when it owns nothing, so the field can be cleared.
+--
+-- @param written table { pickStatus = n?, rating = n?, colorNameForLabel = s? }
+-- @return string
+--
+function Util.cullWrittenEncode(written)
+	written = written or {}
+	local parts = {}
+	if type(written.pickStatus) == "number" and written.pickStatus ~= 0 then
+		table.insert(parts, "flag=" .. tostring(written.pickStatus))
+	end
+	if type(written.rating) == "number" and written.rating > 0 then
+		table.insert(parts, "rating=" .. tostring(written.rating))
+	end
+	if type(written.colorNameForLabel) == "string" and written.colorNameForLabel ~= "" then
+		table.insert(parts, "label=" .. written.colorNameForLabel)
+	end
+	return table.concat(parts, " ")
+end
+
+---
+-- Inverse of `Util.cullWrittenEncode`; anything unreadable decodes as nothing.
+--
+-- @param text string|nil
+-- @return table { pickStatus = n?, rating = n?, colorNameForLabel = s? }
+--
+function Util.cullWrittenDecode(text)
+	local written = {}
+	if type(text) ~= "string" then
+		return written
+	end
+	for key, value in text:gmatch("(%a+)=(%S+)") do
+		if key == "flag" then
+			written.pickStatus = tonumber(value)
+		elseif key == "rating" then
+			written.rating = tonumber(value)
+		elseif key == "label" then
+			written.colorNameForLabel = value
+		end
+	end
+	return written
+end
+
+---
 -- Decides which Lightroom flags, star ratings and colour labels a cull result
 -- should write, photo by photo, and what it must leave alone.
 --
--- Pure: it reads the backend result and what the catalog holds now, and
--- returns the writes for the task to apply inside one undoable write-access
--- block. Frames of a bracket, focus stack or panorama (`keep_all`) are never
--- touched — every one of them is wanted.
+-- Pure: it reads the backend result, what the catalog holds now, and what an
+-- earlier cull wrote (`cullWritten`), and returns the writes for the task to
+-- apply inside one undoable write-access block. Frames of a bracket, focus
+-- stack or panorama (`keep_all`) are never touched — every one of them is
+-- wanted.
 --
--- `respectExisting` is what keeps a re-run from undoing the photographer's own
--- work: a photo that already carries a flag keeps it, a photo that already has
--- stars keeps them, and a photo with a colour label keeps that. Only when it
--- is off does the cull overwrite — and then an alternate that still carries a
--- flag from an earlier run is unflagged, so the catalog reflects this run and
--- not a mixture.
+-- Ownership is what makes a re-run safe. A mark equal to what the last cull
+-- wrote is the cull's: it is refreshed to this run's decision, or cleared
+-- when the decision no longer calls for it (an earlier pick that is now an
+-- alternate loses its flag, an earlier "look before deleting" label goes).
+-- Any other mark is the photographer's and is left alone and counted —
+-- unless `overwriteUserMarks` is on, which is the explicit "re-cull from
+-- scratch" and the only way a user flag is ever changed.
 --
 -- @param groups table `groups` from `/cull/grade`.
--- @param options table `flagPicks`, `flagRejects`, `respectExisting`,
---        `rateByDecision`, `labelStrongMoment` (booleans).
+-- @param options table `flagPicks`, `flagRejects`, `rateByDecision`,
+--        `labelStrongMoment`, `overwriteUserMarks` (booleans).
 -- @param current table photoId -> { pickStatus = n, rating = n,
---        colorNameForLabel = s }; what the catalog holds now.
--- @return table plan: photoId -> { pickStatus = n?, rating = n?,
---         colorNameForLabel = s? }, only the fields that change.
--- @return table counts: `picks`, `rejects`, `cleared`, `ratings`, `labels`,
---         `keptFlags`, `keptRatings`, `keptLabels` (the last three are what
---         `respectExisting` protected).
+--        colorNameForLabel = s, written = table }; what the catalog holds now
+--        and what the last cull wrote, decoded.
+-- @return table plan: photoId -> { pickStatus = n?, rating = n|false?,
+--         colorNameForLabel = s|false?, written = string }; `false` clears a
+--         value, `written` is the new `cullWritten` field.
+-- @return table counts: `picks`, `rejects`, `cleared`, `ratings`,
+--         `ratingsCleared`, `labels`, `labelsCleared`, `keptFlags`,
+--         `keptRatings`, `keptLabels` (the last three are the photographer's
+--         own marks that were left alone).
 --
 function Util.cullFlagPlan(groups, options, current)
 	options = options or {}
@@ -3145,17 +3196,18 @@ function Util.cullFlagPlan(groups, options, current)
 		rejects = 0,
 		cleared = 0,
 		ratings = 0,
+		ratingsCleared = 0,
 		labels = 0,
+		labelsCleared = 0,
 		keptFlags = 0,
 		keptRatings = 0,
 		keptLabels = 0,
 	}
-	local respect = options.respectExisting ~= false
+	local overwrite = options.overwriteUserMarks == true
 	local flagsOn = options.flagPicks or options.flagRejects
 
-	local function changes(id)
-		plan[id] = plan[id] or {}
-		return plan[id]
+	local function isLabel(value)
+		return type(value) == "string" and value ~= "" and value ~= "none" and value ~= "gray" and value ~= "grey"
 	end
 
 	for _, group in ipairs(groups or {}) do
@@ -3165,65 +3217,93 @@ function Util.cullFlagPlan(groups, options, current)
 				if id then
 					local decision = Util.cullDecisionOf(photoResult)
 					local now = current[id] or {}
+					local wrote = now.written or {}
 					local nowFlag = tonumber(now.pickStatus) or 0
 					local nowRating = tonumber(now.rating) or 0
-					local nowLabel = now.colorNameForLabel
-					local hasLabel = type(nowLabel) == "string"
-						and nowLabel ~= ""
-						and nowLabel ~= "none"
-						and nowLabel ~= "gray"
-						and nowLabel ~= "grey"
+					local nowLabel = isLabel(now.colorNameForLabel) and now.colorNameForLabel or nil
+					-- A mark is the cull's when it still reads what the cull wrote.
+					local flagIsOurs = nowFlag ~= 0 and wrote.pickStatus == nowFlag
+					local ratingIsOurs = nowRating > 0 and wrote.rating == nowRating
+					local labelIsOurs = nowLabel ~= nil and wrote.colorNameForLabel == nowLabel
+					local change = {}
+					local written = {}
 
-					-- Flags.
-					local wantFlag
+					-- Flags. `wantFlag` 0 means "no flag of ours here".
+					local wantFlag = 0
 					if decision == "pick" and options.flagPicks then
 						wantFlag = 1
 					elseif decision == "reject_candidate" and options.flagRejects then
 						wantFlag = -1
-					elseif decision == "alternate" and flagsOn and not respect then
-						wantFlag = 0
 					end
-					if wantFlag ~= nil and wantFlag ~= nowFlag then
-						if respect and nowFlag ~= 0 then
-							counts.keptFlags = counts.keptFlags + 1
-						else
-							changes(id).pickStatus = wantFlag
-							if wantFlag == 1 then
-								counts.picks = counts.picks + 1
-							elseif wantFlag == -1 then
-								counts.rejects = counts.rejects + 1
+					if flagsOn then
+						if wantFlag ~= 0 then
+							if nowFlag == wantFlag then
+								written.pickStatus = wantFlag
+							elseif nowFlag == 0 or flagIsOurs or overwrite then
+								change.pickStatus = wantFlag
+								written.pickStatus = wantFlag
+								if wantFlag == 1 then
+									counts.picks = counts.picks + 1
+								else
+									counts.rejects = counts.rejects + 1
+								end
 							else
-								counts.cleared = counts.cleared + 1
+								counts.keptFlags = counts.keptFlags + 1
 							end
+						elseif nowFlag ~= 0 and (flagIsOurs or overwrite) then
+							change.pickStatus = 0
+							counts.cleared = counts.cleared + 1
 						end
+					elseif flagIsOurs then
+						-- Flags switched off this run: an earlier cull's flag stays
+						-- but is no longer tracked as ours.
+						written.pickStatus = nil
 					end
 
 					-- Stars.
-					if options.rateByDecision then
-						local wantRating = Util.CULL_RATING_BY_DECISION[decision]
-						if wantRating and wantRating ~= nowRating then
-							if respect and nowRating > 0 then
-								counts.keptRatings = counts.keptRatings + 1
-							else
-								changes(id).rating = wantRating
-								counts.ratings = counts.ratings + 1
-							end
+					local wantRating = options.rateByDecision and Util.CULL_RATING_BY_DECISION[decision] or nil
+					if wantRating then
+						if nowRating == wantRating then
+							written.rating = wantRating
+						elseif nowRating == 0 or ratingIsOurs or overwrite then
+							change.rating = wantRating
+							written.rating = wantRating
+							counts.ratings = counts.ratings + 1
+						else
+							counts.keptRatings = counts.keptRatings + 1
 						end
+					elseif options.rateByDecision and ratingIsOurs then
+						change.rating = false
+						counts.ratingsCleared = counts.ratingsCleared + 1
 					end
 
 					-- "Look before deleting" label.
-					if
-						options.labelStrongMoment
+					local wantLabel = options.labelStrongMoment
 						and decision == "reject_candidate"
 						and Util.table_contains(photoResult.reason_codes or {}, "strong_moment_but_unusable")
-						and nowLabel ~= Util.CULL_STRONG_MOMENT_LABEL
-					then
-						if respect and hasLabel then
-							counts.keptLabels = counts.keptLabels + 1
-						else
-							changes(id).colorNameForLabel = Util.CULL_STRONG_MOMENT_LABEL
+					if wantLabel then
+						if nowLabel == Util.CULL_STRONG_MOMENT_LABEL then
+							written.colorNameForLabel = nowLabel
+						elseif nowLabel == nil or labelIsOurs or overwrite then
+							change.colorNameForLabel = Util.CULL_STRONG_MOMENT_LABEL
+							written.colorNameForLabel = Util.CULL_STRONG_MOMENT_LABEL
 							counts.labels = counts.labels + 1
+						else
+							counts.keptLabels = counts.keptLabels + 1
 						end
+					elseif options.labelStrongMoment and labelIsOurs then
+						change.colorNameForLabel = false
+						counts.labelsCleared = counts.labelsCleared + 1
+					end
+
+					-- Record ownership whenever it changed, including to nothing.
+					local encoded = Util.cullWrittenEncode(written)
+					local before = Util.cullWrittenEncode(wrote)
+					if encoded ~= before then
+						change.written = encoded
+					end
+					if next(change) ~= nil then
+						plan[id] = change
 					end
 				end
 			end
@@ -3258,6 +3338,12 @@ function Util.cullFlagSummaryLines(counts)
 	if (counts.labels or 0) > 0 then
 		table.insert(wrote, tostring(counts.labels) .. " purple 'look before deleting' labels")
 	end
+	if (counts.ratingsCleared or 0) > 0 then
+		table.insert(wrote, tostring(counts.ratingsCleared) .. " earlier star ratings removed")
+	end
+	if (counts.labelsCleared or 0) > 0 then
+		table.insert(wrote, tostring(counts.labelsCleared) .. " earlier labels removed")
+	end
 	if #wrote > 0 then
 		table.insert(lines, "Lightroom: " .. table.concat(wrote, ", ") .. ". Undo with Cmd/Ctrl+Z.")
 	end
@@ -3272,7 +3358,7 @@ function Util.cullFlagSummaryLines(counts)
 		table.insert(kept, tostring(counts.keptLabels) .. " labels")
 	end
 	if #kept > 0 then
-		table.insert(lines, "Left alone because you had already set them: " .. table.concat(kept, ", ") .. ".")
+		table.insert(lines, "Left alone because you set them yourself: " .. table.concat(kept, ", ") .. ".")
 	end
 	return lines
 end

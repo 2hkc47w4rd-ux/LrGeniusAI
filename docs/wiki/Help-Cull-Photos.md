@@ -78,12 +78,14 @@ hand, so the Library filter bar, the flag shortcuts and
   that had its group's strongest moment but a technical flaw is labelled
   purple, so it stands out in the grid before you delete rejects. On by
   default.
-- **Leave photos I have already flagged, rated or labelled alone** – on by
-  default. A photo that already carries a flag keeps it, one with stars
-  keeps them, one with a colour label keeps it, and the completion dialog
-  says how many were protected. Switch it off to re-cull from scratch: the
-  run then overwrites earlier marks and unflags alternates that still carry
-  a flag from an earlier run.
+- **Also overwrite flags, stars and labels I set myself** – off by default.
+  The plugin remembers what each cull wrote on a photo (the *Culling wrote*
+  field in the Metadata panel), so it can tell its own marks from yours. Marks
+  an earlier cull wrote are always brought up to date with the new run — an
+  earlier pick that is now an alternate loses its flag, an earlier "look
+  before deleting" label goes — while a flag, rating or label you set
+  yourself is left alone and counted in the completion dialog. Turn this on
+  only to re-cull from scratch over your own marks.
 
 Everything the run writes is one history step, so **Cmd/Ctrl+Z** takes it all
 back. Frames of an exposure bracket, focus stack or panorama are never flagged
@@ -284,15 +286,13 @@ badly (whole sequences of similar frames collapse into one group with one
 pick), so the plugin offers to prepare them again once; a photo that has no
 capture time anywhere is remembered as such and not asked about again.
 
-Rejects for blur, a blink, a blocked face or a weak face are judged against
-the other frames of the group as well as against fixed thresholds: a frame is
-only a blink when its eyes read clearly less open than the best frame of its
-burst, and only blurred when clearly softer than the sharpest frame of it. On
-small faces the eye estimate reads "closed" on every frame, and the frames of
-one burst are almost equally sharp, so without this every frame but the pick
-was a reject. A single photo, or a burst whose sharpest frame is itself soft,
-is still judged on its own: a burst that missed focus throughout is rejected
-whole.
+Rejects for a blink, a blocked face or a weak face are judged against the
+other frames of the group as well as against fixed thresholds: a frame is only
+a blink when its eyes read clearly less open than the best frame of its burst.
+On small faces the eye estimate reads "closed" on every frame, so without this
+every frame but the pick was a reject. The same treatment for blur exists in
+the backend but is switched off until it has been checked against hand-culled
+shoots of several genres.
 
 ## Tips for best results
 

@@ -253,6 +253,12 @@ pub struct RankingConfig {
     /// measured on a real shoot), roughly half its whole range, so the
     /// shared margin fired in most multi-face groups.
     pub relative_occlusion_margin: f64,
+    /// Judge blur against the group too (soft *and* clearly softer than the
+    /// sharpest sibling). **Off by default, pending calibration:** it and the
+    /// wider occlusion margin were fitted to the stored metrics of one shoot,
+    /// and the maintainers asked to hold them until a hand-cull comparison
+    /// across genres exists. `--ablate` them in `cull_eval` once it does.
+    pub relative_blur_rule: bool,
 }
 
 /// Which deliberately-captured multi-frame set a group is, if any.
@@ -422,7 +428,10 @@ const BASE: CullingConfig = CullingConfig {
         reason_moment_margin: 0.15,
         relative_defect_rules: true,
         relative_defect_margin: 0.10,
-        relative_occlusion_margin: 0.20,
+        // Same as the shared margin until calibrated; 0.20 (half the proxy's
+        // range) is the measured candidate — see `relative_blur_rule`.
+        relative_occlusion_margin: 0.10,
+        relative_blur_rule: false,
     },
     sets: SetDetectionConfig {
         enabled: true,

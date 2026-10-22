@@ -59,21 +59,77 @@ pub fn read_capture_time(image_bytes: &[u8]) -> Option<f64> {
     let exif = exif::Reader::new()
         .read_from_container(&mut Cursor::new(image_bytes))
         .ok()?;
-    for tag in [exif::Tag::DateTimeOriginal, exif::Tag::DateTime] {
-        let Some(field) = exif.get_field(tag, exif::In::PRIMARY) else {
-            continue;
-        };
+    let ascii = |tag: exif::Tag| -> Option<String> {
+        let field = exif.get_field(tag, exif::In::PRIMARY)?;
         let exif::Value::Ascii(parts) = &field.value else {
+            return None;
+        };
+        parts
+            .first()
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .map(|t| t.trim().to_string())
+    };
+    for (tag, subsec_tag, offset_tag) in [
+        (
+            exif::Tag::DateTimeOriginal,
+            exif::Tag::SubSecTimeOriginal,
+            exif::Tag::OffsetTimeOriginal,
+        ),
+        (
+            exif::Tag::DateTime,
+            exif::Tag::SubSecTime,
+            exif::Tag::OffsetTime,
+        ),
+    ] {
+        let Some(text) = ascii(tag) else {
             continue;
         };
-        let Some(text) = parts.first().and_then(|b| std::str::from_utf8(b).ok()) else {
+        let Some(mut ts) = parse_exif_datetime(&text) else {
             continue;
         };
-        if let Some(ts) = parse_exif_datetime(text.trim()) {
-            return Some(ts);
+        // Fraction of a second: at 20–30 fps the frames of one burst share a
+        // whole second, and without this their order falls back to the
+        // filename and the burst window blurs by a second each way.
+        if let Some(fraction) = ascii(subsec_tag).and_then(|t| parse_subsec(&t)) {
+            ts += fraction;
         }
+        // "+01:00": turns the camera's local clock into a real epoch, which
+        // is what `local_hour` downstream assumes it already is.
+        if let Some(offset) = ascii(offset_tag).and_then(|t| parse_utc_offset(&t)) {
+            ts -= offset;
+        }
+        return Some(ts);
     }
     None
+}
+
+/// `SubSecTime*` is the fractional digits only ("57" is .57 s, "570" is
+/// .570 s), so the number of digits sets the scale.
+fn parse_subsec(text: &str) -> Option<f64> {
+    let digits = text.trim();
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let value: f64 = digits.parse().ok()?;
+    Some(value / 10f64.powi(digits.len() as i32))
+}
+
+/// `±HH:MM` to seconds east of UTC. `None` for anything else, including the
+/// "Z" and blank values some bodies write.
+fn parse_utc_offset(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let sign = match text.chars().next()? {
+        '+' => 1.0,
+        '-' => -1.0,
+        _ => return None,
+    };
+    let (h, m) = text[1..].split_once(':')?;
+    let hours: f64 = h.parse().ok()?;
+    let minutes: f64 = m.parse().ok()?;
+    if hours > 14.0 || minutes >= 60.0 {
+        return None;
+    }
+    Some(sign * (hours * 3600.0 + minutes * 60.0))
 }
 
 /// `YYYY:MM:DD HH:MM:SS` to Unix seconds, treating the value as UTC. Returns
@@ -113,6 +169,21 @@ mod capture_time_tests {
             Some(1_792_582_200.0)
         );
         assert_eq!(parse_exif_datetime("1970:01:01 00:00:00"), Some(0.0));
+    }
+
+    #[test]
+    fn subseconds_and_offsets_refine_the_whole_second() {
+        use super::{parse_subsec, parse_utc_offset};
+        assert_eq!(parse_subsec("57"), Some(0.57));
+        assert_eq!(parse_subsec("570"), Some(0.57));
+        assert_eq!(parse_subsec("007"), Some(0.007));
+        assert_eq!(parse_subsec(""), None);
+        assert_eq!(parse_subsec("5a"), None);
+        assert_eq!(parse_utc_offset("+01:00"), Some(3600.0));
+        assert_eq!(parse_utc_offset("-04:30"), Some(-16200.0));
+        assert_eq!(parse_utc_offset("Z"), None);
+        assert_eq!(parse_utc_offset("   "), None);
+        assert_eq!(parse_utc_offset("+25:00"), None);
     }
 
     #[test]

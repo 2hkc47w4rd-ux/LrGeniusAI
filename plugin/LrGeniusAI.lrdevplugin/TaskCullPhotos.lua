@@ -14,7 +14,7 @@ local function showCullDialog(ctx)
 	-- away from deleting files. Both honour existing flags unless told not to.
 	props.flagPicks = prefs.cullFlagPicks ~= false
 	props.flagRejects = prefs.cullFlagRejects == true
-	props.respectExistingFlags = prefs.cullRespectExistingFlags ~= false
+	props.overwriteUserMarks = prefs.cullOverwriteUserMarks == true
 	props.rateByDecision = prefs.cullRateByDecision == true
 	props.labelStrongMoment = prefs.cullLabelStrongMoment ~= false
 
@@ -138,10 +138,11 @@ local function showCullDialog(ctx)
 				title = "Purple label on rejects with the group's strongest moment ('look before deleting')",
 			}),
 			f:checkbox({
-				value = bind("respectExistingFlags"),
-				title = "Leave photos I have already flagged, rated or labelled alone",
-				tooltip = "Off: this run overwrites earlier flags, stars and labels, and unflags alternates "
-					.. "that still carry a flag from an earlier run. Everything is one undo step either way.",
+				value = bind("overwriteUserMarks"),
+				title = "Also overwrite flags, stars and labels I set myself",
+				tooltip = "Marks an earlier cull wrote are always updated to this run's decisions. "
+					.. "Your own flags, stars and labels are left alone unless this is on. "
+					.. "Everything is one undo step either way.",
 			}),
 			f:static_text({
 				title = "Brackets, focus stacks and panoramas are never flagged or rated.",
@@ -168,7 +169,7 @@ local function showCullDialog(ctx)
 	prefs.cullStrength = props.cullStrength
 	prefs.cullFlagPicks = props.flagPicks
 	prefs.cullFlagRejects = props.flagRejects
-	prefs.cullRespectExistingFlags = props.respectExistingFlags
+	prefs.cullOverwriteUserMarks = props.overwriteUserMarks
 	prefs.cullRateByDecision = props.rateByDecision
 	prefs.cullLabelStrongMoment = props.labelStrongMoment
 
@@ -180,16 +181,17 @@ local function showCullDialog(ctx)
 		cullStrength = props.cullStrength,
 		flagPicks = props.flagPicks,
 		flagRejects = props.flagRejects,
-		respectExistingFlags = props.respectExistingFlags,
+		overwriteUserMarks = props.overwriteUserMarks,
 		rateByDecision = props.rateByDecision,
 		labelStrongMoment = props.labelStrongMoment,
 	}
 end
 
 ---
--- What the catalog holds now for the photos a cull touched: flag, stars and
--- colour label, by photo ID. `Util.cullFlagPlan` needs it to leave the
--- photographer's own decisions alone.
+-- What the catalog holds now for the photos a cull touched — flag, stars and
+-- colour label — plus what the last cull wrote (`cullWritten`), by photo ID.
+-- `Util.cullFlagPlan` compares the two to tell the cull's own marks from the
+-- photographer's.
 --
 -- One batched read; falls back to per-photo reads if the batch call fails, as
 -- `PhotoSelector` does, so a read error degrades to slower rather than to
@@ -214,15 +216,25 @@ local function currentFlagsByPhotoId(catalog, photoById)
 				current[photoId] = values
 			end
 		end
-		return current
+	else
+		log:warn("batchGetRawMetadata failed before applying cull flags; reading per photo: " .. tostring(batch))
+		for photoId, photo in pairs(photoById) do
+			current[photoId] = {
+				pickStatus = photo:getRawMetadata("pickStatus"),
+				rating = photo:getRawMetadata("rating"),
+				colorNameForLabel = photo:getRawMetadata("colorNameForLabel"),
+			}
+		end
 	end
-	log:warn("batchGetRawMetadata failed before applying cull flags; reading per photo: " .. tostring(batch))
+	-- What the last cull wrote. Read per photo with `noThrow`: a catalog that
+	-- never saw this field (older plugin) simply has nothing recorded, which
+	-- makes every existing mark the photographer's — the safe reading.
 	for photoId, photo in pairs(photoById) do
-		current[photoId] = {
-			pickStatus = photo:getRawMetadata("pickStatus"),
-			rating = photo:getRawMetadata("rating"),
-			colorNameForLabel = photo:getRawMetadata("colorNameForLabel"),
-		}
+		local okProp, written = LrTasks.pcall(function()
+			return photo:getPropertyForPlugin(_PLUGIN, "cullWritten", nil, true)
+		end)
+		current[photoId] = current[photoId] or {}
+		current[photoId].written = Util.cullWrittenDecode(okProp and written or nil)
 	end
 	return current
 end
@@ -767,7 +779,10 @@ LrTasks.startAsyncTask(function()
 			end
 		end
 
-		catalog:withPrivateWriteAccessDo(function()
+		-- `with*WriteAccessDo` returns "aborted" (without throwing) when the
+		-- catalog could not be locked within the timeout, so every write block
+		-- here checks its return value instead of assuming it ran.
+		local metadataWrite = catalog:withPrivateWriteAccessDo(function()
 			for photoId, cullData in pairs(cullDataByPhotoId) do
 				local photo = photoById[photoId]
 				if photo then
@@ -779,6 +794,10 @@ LrTasks.startAsyncTask(function()
 				end
 			end
 		end, Defaults.catalogWriteAccessOptions)
+		local metadataAborted = metadataWrite == "aborted"
+		if metadataAborted then
+			log:error("Writing culling metadata was aborted: the catalog was busy")
+		end
 
 		-- Flags, stars and labels: the result in the form a photographer culls
 		-- with, so the filter bar and Photo > Delete Rejected Photos work on it
@@ -793,14 +812,14 @@ LrTasks.startAsyncTask(function()
 			plan, flagCounts = Util.cullFlagPlan(groups, {
 				flagPicks = options.flagPicks,
 				flagRejects = options.flagRejects,
-				respectExisting = options.respectExistingFlags,
+				overwriteUserMarks = options.overwriteUserMarks,
 				rateByDecision = options.rateByDecision,
 				labelStrongMoment = options.labelStrongMoment,
 			}, current)
 			local hasChanges = next(plan) ~= nil
 			if hasChanges then
-				local ok, writeErr = LrTasks.pcall(function()
-					catalog:withWriteAccessDo("Apply culling flags and ratings", function()
+				local ok, writeResult = LrTasks.pcall(function()
+					return catalog:withWriteAccessDo("Apply culling flags and ratings", function()
 						for photoId, change in pairs(plan) do
 							local photo = photoById[photoId]
 							if photo then
@@ -808,24 +827,38 @@ LrTasks.startAsyncTask(function()
 									photo:setRawMetadata("pickStatus", change.pickStatus)
 								end
 								if change.rating ~= nil then
-									photo:setRawMetadata("rating", change.rating)
+									-- `false` clears: a rating of nil is "no stars".
+									photo:setRawMetadata("rating", change.rating or nil)
 								end
 								if change.colorNameForLabel ~= nil then
-									photo:setRawMetadata("colorNameForLabel", change.colorNameForLabel)
+									if change.colorNameForLabel then
+										photo:setRawMetadata("colorNameForLabel", change.colorNameForLabel)
+									else
+										-- An empty label text removes the label.
+										photo:setRawMetadata("label", "")
+									end
+								end
+								if change.written ~= nil then
+									-- Ownership record, in the same undo step as the marks.
+									photo:setPropertyForPlugin(_PLUGIN, "cullWritten", change.written)
 								end
 							end
 						end
 					end, Defaults.catalogWriteAccessOptions)
 				end)
 				if not ok then
-					flagsFailed = tostring(writeErr)
+					flagsFailed = tostring(writeResult)
+				elseif writeResult == "aborted" then
+					flagsFailed = "the catalog was busy and the write timed out"
+				end
+				if flagsFailed then
 					flagCounts = nil
 					log:error("Applying cull flags failed: " .. flagsFailed)
 				end
 			end
 		end
 
-		catalog:withWriteAccessDo("Create culling collections", function()
+		local collectionsWrite = catalog:withWriteAccessDo("Create culling collections", function()
 			resultSet = catalog:createCollectionSet(
 				LOC("$$$/LrGeniusAI/CullTask/ResultSet=Culling Results @ ^1", timestamp),
 				nil,
@@ -858,6 +891,15 @@ LrTasks.startAsyncTask(function()
 				)
 			end
 		end, Defaults.catalogWriteAccessOptions)
+
+		if collectionsWrite == "aborted" then
+			ErrorHandler.handleError(
+				LOC("$$$/LrGeniusAI/CullTask/ErrorTitle=Culling failed"),
+				"The result collections could not be created: the catalog was busy and the write timed out. "
+					.. "Nothing else was changed by this step; run the cull again."
+			)
+			return
+		end
 
 		if picksCollection then
 			catalog:setActiveSources({ picksCollection })
@@ -904,6 +946,12 @@ LrTasks.startAsyncTask(function()
 				.. "The flags, ratings and labels could not be written: "
 				.. flagsFailed
 				.. "\nThe collections above are complete; apply the flags from them by hand or run the cull again."
+		end
+		if metadataAborted then
+			completionMessage = completionMessage
+				.. "\n\n"
+				.. "The culling decision, score and explanation could not be written to the Metadata panel: "
+				.. "the catalog was busy and the write timed out. Run the cull again to fill them in."
 		end
 
 		-- Photos that fell out of the run rather than being culled: no usable

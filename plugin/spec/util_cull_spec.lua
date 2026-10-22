@@ -111,20 +111,31 @@ describe("Util.cullSortByScore", function()
 	end)
 end)
 
+describe("Util.cullWrittenEncode / Decode", function()
+	it("round-trips what a cull wrote and drops what it does not own", function()
+		local text = Util.cullWrittenEncode({ pickStatus = 1, rating = 3, colorNameForLabel = "purple" })
+		assert.are.equal("flag=1 rating=3 label=purple", text)
+		assert.are.same({ pickStatus = 1, rating = 3, colorNameForLabel = "purple" }, Util.cullWrittenDecode(text))
+		assert.are.equal("", Util.cullWrittenEncode({ pickStatus = 0, rating = 0 }))
+		assert.are.same({}, Util.cullWrittenDecode(nil))
+		assert.are.same({}, Util.cullWrittenDecode("garbage"))
+		assert.are.same({ pickStatus = -1 }, Util.cullWrittenDecode("flag=-1"))
+	end)
+end)
+
 describe("Util.cullFlagPlan", function()
 	local everything = {
 		flagPicks = true,
 		flagRejects = true,
-		respectExisting = true,
 		rateByDecision = true,
 		labelStrongMoment = true,
 	}
 
-	it("flags, rates and labels an untouched burst", function()
+	it("flags, rates and labels an untouched burst and records what it wrote", function()
 		local plan, counts = Util.cullFlagPlan({ burst() }, everything, {})
-		assert.are.same({ pickStatus = 1, rating = 3 }, plan.p1)
-		assert.are.same({ rating = 2 }, plan.p2)
-		assert.are.same({ pickStatus = -1, colorNameForLabel = "purple" }, plan.p3)
+		assert.are.same({ pickStatus = 1, rating = 3, written = "flag=1 rating=3" }, plan.p1)
+		assert.are.same({ rating = 2, written = "rating=2" }, plan.p2)
+		assert.are.same({ pickStatus = -1, colorNameForLabel = "purple", written = "flag=-1 label=purple" }, plan.p3)
 		assert.are.equal(1, counts.picks)
 		assert.are.equal(1, counts.rejects)
 		assert.are.equal(2, counts.ratings)
@@ -134,14 +145,14 @@ describe("Util.cullFlagPlan", function()
 
 	it("writes only what was asked for", function()
 		local plan = Util.cullFlagPlan({ burst() }, { flagPicks = true }, {})
-		assert.are.same({ pickStatus = 1 }, plan.p1)
+		assert.are.same({ pickStatus = 1, written = "flag=1" }, plan.p1)
 		assert.is_nil(plan.p2)
 		assert.is_nil(plan.p3)
 	end)
 
 	it("leaves the photographer's own flags, stars and labels alone", function()
-		-- The user already picked p3 and rejected p1 — the opposite of the
-		-- backend's view. Their decision stands; the plan says what it kept.
+		-- The user picked p3 and rejected p1 — the opposite of the backend's
+		-- view — and nothing records a cull having written those. Theirs.
 		local current = {
 			p1 = { pickStatus = -1, rating = 1, colorNameForLabel = "red" },
 			p3 = { pickStatus = 1, rating = 0, colorNameForLabel = "red" },
@@ -149,13 +160,59 @@ describe("Util.cullFlagPlan", function()
 		local plan, counts = Util.cullFlagPlan({ burst() }, everything, current)
 		assert.is_nil(plan.p1)
 		assert.is_nil(plan.p3)
-		assert.are.same({ rating = 2 }, plan.p2)
+		assert.are.same({ rating = 2, written = "rating=2" }, plan.p2)
 		assert.are.equal(2, counts.keptFlags)
 		assert.are.equal(1, counts.keptRatings)
 		assert.are.equal(1, counts.keptLabels)
 	end)
 
-	it("overwrites and unflags alternates when told not to respect existing marks", function()
+	it("refreshes marks an earlier cull wrote, so a re-run is never blocked", function()
+		-- Last run: p1 was the pick, p2 a strong-moment reject with a label,
+		-- p3 had 2 stars as an alternate. The decisions moved: now p1 is still
+		-- the pick, p2 is an alternate, p3 the labelled reject.
+		local current = {
+			p1 = { pickStatus = 1, rating = 3, written = { pickStatus = 1, rating = 3 } },
+			p2 = {
+				pickStatus = -1,
+				colorNameForLabel = "purple",
+				written = { pickStatus = -1, colorNameForLabel = "purple" },
+			},
+			p3 = { rating = 2, written = { rating = 2 } },
+		}
+		local plan, counts = Util.cullFlagPlan({ burst() }, everything, current)
+		assert.is_nil(plan.p1, "unchanged decision, unchanged marks")
+		assert.are.same(
+			{ pickStatus = 0, rating = 2, colorNameForLabel = false, written = "rating=2" },
+			plan.p2,
+			"our old reject flag and label go, the alternate's stars come"
+		)
+		assert.are.same(
+			{ pickStatus = -1, rating = false, colorNameForLabel = "purple", written = "flag=-1 label=purple" },
+			plan.p3
+		)
+		assert.are.equal(1, counts.cleared)
+		assert.are.equal(1, counts.labelsCleared)
+		assert.are.equal(1, counts.ratingsCleared)
+		assert.are.equal(0, counts.keptFlags)
+	end)
+
+	it("treats a mark the user changed after a cull as theirs", function()
+		-- The cull wrote a pick on p3; the user turned it into a reject, and
+		-- the decision now agrees. Nothing to change but the record.
+		local current = { p3 = { pickStatus = -1, written = { pickStatus = 1 } } }
+		local plan, counts = Util.cullFlagPlan({ burst() }, { flagPicks = true, flagRejects = true }, current)
+		assert.are.same({ written = "flag=-1" }, plan.p3)
+		assert.are.equal(0, counts.keptFlags)
+
+		-- The cull wrote a pick on p1 and the user removed it. An unflagged
+		-- photo is free to flag again (the record already says "flag=1", so
+		-- only the flag is written); what matters is that no user flag moved.
+		current = { p1 = { pickStatus = 0, written = { pickStatus = 1 } } }
+		plan = Util.cullFlagPlan({ burst() }, { flagPicks = true }, current)
+		assert.are.same({ pickStatus = 1 }, plan.p1)
+	end)
+
+	it("overwrites the user's marks only when told to", function()
 		local current = {
 			p1 = { pickStatus = -1, rating = 1 },
 			p2 = { pickStatus = 1 },
@@ -164,20 +221,20 @@ describe("Util.cullFlagPlan", function()
 		local options = {
 			flagPicks = true,
 			flagRejects = true,
-			respectExisting = false,
+			overwriteUserMarks = true,
 			rateByDecision = true,
 			labelStrongMoment = true,
 		}
 		local plan, counts = Util.cullFlagPlan({ burst() }, options, current)
-		assert.are.same({ pickStatus = 1, rating = 3 }, plan.p1)
-		assert.are.same({ pickStatus = 0, rating = 2 }, plan.p2)
-		assert.are.same({ pickStatus = -1, colorNameForLabel = "purple" }, plan.p3)
+		assert.are.same({ pickStatus = 1, rating = 3, written = "flag=1 rating=3" }, plan.p1)
+		assert.are.same({ pickStatus = 0, rating = 2, written = "rating=2" }, plan.p2)
+		assert.are.same({ pickStatus = -1, colorNameForLabel = "purple", written = "flag=-1 label=purple" }, plan.p3)
 		assert.are.equal(1, counts.cleared)
 		assert.are.equal(0, counts.keptFlags)
 	end)
 
 	it("does not write a value the photo already has", function()
-		local current = { p1 = { pickStatus = 1, rating = 3 } }
+		local current = { p1 = { pickStatus = 1, rating = 3, written = { pickStatus = 1, rating = 3 } } }
 		local plan, counts = Util.cullFlagPlan({ burst() }, { flagPicks = true, rateByDecision = true }, current)
 		assert.is_nil(plan.p1)
 		assert.are.equal(0, counts.picks)
@@ -195,18 +252,26 @@ describe("Util.cullFlagPlan", function()
 	it("treats Lightroom's 'gray' as no label", function()
 		local current = { p3 = { colorNameForLabel = "gray" } }
 		local plan = Util.cullFlagPlan({ burst() }, { labelStrongMoment = true }, current)
-		assert.are.same({ colorNameForLabel = "purple" }, plan.p3)
+		assert.are.same({ colorNameForLabel = "purple", written = "label=purple" }, plan.p3)
 	end)
 end)
 
 describe("Util.cullFlagSummaryLines", function()
 	it("says what was written and what was protected", function()
-		local lines = Util.cullFlagSummaryLines({ picks = 12, rejects = 30, ratings = 20, labels = 2, keptFlags = 3 })
+		local lines = Util.cullFlagSummaryLines({
+			picks = 12,
+			rejects = 30,
+			ratings = 20,
+			labels = 2,
+			labelsCleared = 4,
+			keptFlags = 3,
+		})
 		assert.are.equal(2, #lines)
 		assert.is_truthy(lines[1]:find("12 flagged as picks", 1, true))
 		assert.is_truthy(lines[1]:find("30 flagged as rejected", 1, true))
 		assert.is_truthy(lines[1]:find("20 star ratings", 1, true))
 		assert.is_truthy(lines[1]:find("2 purple", 1, true))
+		assert.is_truthy(lines[1]:find("4 earlier labels removed", 1, true))
 		assert.is_truthy(lines[2]:find("3 flags", 1, true))
 	end)
 
