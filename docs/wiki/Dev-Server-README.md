@@ -17,13 +17,22 @@ clients), `lrg-llama` (in-process llama.cpp, behind the `llamacpp` feature),
 routers, including the agent bridge to the plugin), `lrg-mcp` (the MCP endpoint
 AI agents connect to at `/mcp`, and the `geniusai-server mcp` stdio proxy —
 see [`docs/wiki/Dev-Agent-Bridge.md`](../docs/wiki/Dev-Agent-Bridge.md)),
+`lrg-chat` (the in-app agent chat at `/v1/chat/*` and its page, a local model
+working through the same tools — see
+[`docs/wiki/Dev-Agent-Chat.md`](../docs/wiki/Dev-Agent-Chat.md)),
 `lrg-server` (the binary).
 
 There are two *local* LLM backends, selected as the `llamacpp` and `mlx`
 providers. They are independent — a build can have either, both, or neither —
 and both are served by the same `LocalEngine` trait in
-`lrg-providers/src/local_provider.rs`. Their build requirements differ, so they
-are covered separately below.
+`lrg-providers/src/local.rs`. Besides indexing photos in batches
+(`generate`), the trait answers a whole conversation with one turn,
+streaming its text as it is decoded (`chat`) — the agent chat is built on that.
+The chat itself talks to a model-neutral `ChatModel` (`lrg-providers/src/chat.rs`);
+`local_chat.rs` puts a local engine behind it, calling tools by decoding
+against a JSON Schema with one branch per tool, since llama.cpp cannot render
+the Jinja templates that carry a model's native tool-call format.
+Their build requirements differ, so they are covered separately below.
 
 **Which one ships is a per-platform decision.** Release builds enable
 `llamacpp` on **Windows only**; the **macOS build is MLX-only** and does not

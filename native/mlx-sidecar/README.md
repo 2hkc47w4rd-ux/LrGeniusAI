@@ -38,6 +38,15 @@ xcodebuild build \
 plugin (`CudaBuild`) that Xcode otherwise stops to ask about — which a CI runner
 can never answer.
 
+**Xcode 27.1: `extraneous argument label 'capabilities:'` in
+`MLXFoundationModels`.** That module wraps Apple's FoundationModels and was
+written against a beta SDK. Nothing here uses it, and `Package.swift` turns off
+the `FoundationModelsIntegration` trait that pulls it in — but Xcode keeps the
+package graph it resolved earlier, and deleting only
+`.build/xcode/SourcePackages` is not enough. If an existing `.build/xcode`
+still fails this way, delete the whole `.build/xcode` (or build into a fresh
+`-derivedDataPath`) and build again.
+
 The products land in `.build/xcode/Build/Products/Release/`:
 
 | File | Why it matters |
@@ -64,9 +73,22 @@ printf '%s\n' \
   | ./.build/xcode/Build/Products/Release/lrgenius-mlx
 ```
 
-Operations: `ping`, `load`, `generate`, `status`, `unload`, `shutdown`. Only
-`load` and `generate` are used by the Rust side; the rest exist for exactly this
-kind of manual poking.
+Operations: `ping`, `load`, `generate`, `chat`, `status`, `unload`,
+`shutdown`. The Rust side uses `load`, `generate` and `chat`; the rest exist for
+exactly this kind of manual poking.
+
+`chat` answers a conversation with one assistant turn:
+
+```bash
+'{"id":2,"op":"chat","chat":{"messages":[{"role":"system","text":"Be brief."},{"role":"user","text":"Name three primary colours."}],"max_tokens":40,"temperature":0.0}}'
+```
+
+`role` is `system`, `user` or `assistant`; a turn may carry `images` (a list
+of the payloads described below), and `schema` constrains the answer as in
+`generate`. While it decodes, the sidecar writes `{"id":2,"delta":"..."}` lines
+with the next piece of text, then the usual response with the whole answer as
+the one entry in `results`. Unconstrained answers arrive as a single delta at
+the end: that decode path hands back token ids, not text.
 
 stdout carries protocol lines *only*. Logs go to stderr, which the Rust
 supervisor inherits so they land in the server log. Nothing in the target may
@@ -123,6 +145,14 @@ at a time (there is no shared prefix to amortise and one VLM prefill already
 saturates the GPU), and the JSON-Schema grammar is compiled per request rather
 than cloned, because `GrammarConstraint.clone()` — xgrammar's
 `GrammarMatcher::Fork()` — fails with `forkFailed` in this build.
+
+**Control tokens are kept out of answers.** `TokenizerVocabExtractor` hands
+them to XGrammar as plain text (`<|channel>`, `<start_of_turn>`, …), so a
+model could write one inside a JSON string — Gemma 4 12B did, mid-answer, in
+the agent chat. `Engine.withoutControlTokens` blanks their entries before the
+grammar vocabulary is built, because XGrammar never accepts a token whose text
+is empty; EOS is kept, since it ends an answer. The load log says how many
+(23 for Gemma 4). llama.cpp's llguidance excludes them already.
 
 ## Dependency pinning
 
