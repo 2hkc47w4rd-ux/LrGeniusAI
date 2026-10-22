@@ -143,6 +143,9 @@ performs them against the catalog. Reach for this when a task is a grid of
 server-side data that LrView cannot re-render (see
 [Dev-Backend-API.md](docs/wiki/Dev-Backend-API.md) for the bridge contract);
 keep settings and short forms native.
+`TaskChat.lua` goes further: the chat page at `/v1/ui/chat` works through
+the agent bridge, which runs whenever Lightroom does, so the task only opens
+a chat and hands the browser its address.
 
 All long-running operations run inside `LrTasks.startAsyncTask`. Use `LrTasks.pcall` (never native `pcall`) so tasks can yield.
 
@@ -161,7 +164,8 @@ Cargo workspace, one binary (`geniusai-server`) across these crates:
 - `lrg-mlx` — supervises the `lrgenius-mlx` Swift sidecar (`native/mlx-sidecar/`) and speaks its JSON-lines stdio protocol. No native build step, no cargo feature; Apple silicon only at runtime.
 - `lrg-api` — axum routers (one module per API domain under `routes/`), `db_path` auto-bind middleware, jobs registry, and the browser UI: the pages under `src/ui/` served by `routes/ui.rs`, plus the `ui_bridge` queue that hands their actions to the plugin, and the `agent_bridge` that hands MCP tool calls to the plugin (`/v1/agent/*`).
 - `lrg-mcp` — the MCP endpoint (`/mcp`, bearer agent token required) AI agents connect to: tools over the index (calling the REST routes in-process) and over Lightroom (through `agent_bridge` to the plugin's `AgentBridge.lua`/`AgentCommands.lua`, which starts with Lightroom), result sets, prompts, and `geniusai-server mcp`, a stdio proxy for Claude Desktop. See [Dev-Agent-Bridge.md](docs/wiki/Dev-Agent-Bridge.md).
-- `lrg-server` — the binary: CLI (`clap`), lifecycle, self-updater (`routes::update`), `migrate` and `mcp` (stdio proxy) subcommands; merges the `lrg-mcp` router next to `lrg_api::build_router`'s.
+- `lrg-chat` — the in-app agent chat (`/v1/chat/*`): a local or cloud model works the catalog through the same tools, as an in-memory MCP client of `lrg-mcp`, with the user's approval (`permissions.rs`). The model answers through `lrg_providers::chat::ChatModel`: `cloud_chat.rs` uses each API's own tool calling, and `local_chat.rs` does it by decoding against a JSON Schema, since llama.cpp cannot render the Jinja templates that carry a model's native tool-call format. See [Dev-Agent-Chat.md](docs/wiki/Dev-Agent-Chat.md).
+- `lrg-server` — the binary: CLI (`clap`), lifecycle, self-updater (`routes::update`), `migrate` and `mcp` (stdio proxy) subcommands; merges the `lrg-mcp` and `lrg-chat` routers next to `lrg_api::build_router`'s.
 
 `APISearchIndex.lua` on the plugin side defines the API contract; keep it in sync with any endpoint changes here.
 

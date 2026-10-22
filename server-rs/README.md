@@ -13,13 +13,22 @@ clients), `lrg-llama` (in-process llama.cpp, behind the `llamacpp` feature),
 routers, including the agent bridge to the plugin), `lrg-mcp` (the MCP endpoint
 AI agents connect to at `/mcp`, and the `geniusai-server mcp` stdio proxy —
 see [`docs/wiki/Dev-Agent-Bridge.md`](../docs/wiki/Dev-Agent-Bridge.md)),
+`lrg-chat` (the in-app agent chat at `/v1/chat/*` and its page, a local or
+cloud model working through the same tools — see
+[`docs/wiki/Dev-Agent-Chat.md`](../docs/wiki/Dev-Agent-Chat.md)),
 `lrg-server` (the binary).
 
 There are two *local* LLM backends, selected as the `llamacpp` and `mlx`
 providers. They are independent — a build can have either, both, or neither —
 and both are served by the same `LocalEngine` trait in
-`lrg-providers/src/local_provider.rs`. Their build requirements differ, so they
-are covered separately below.
+`lrg-providers/src/local.rs`. Besides indexing photos in batches
+(`generate`), the trait answers a whole conversation with one turn,
+streaming its text as it is decoded (`chat`) — the agent chat is built on that.
+The chat itself talks to a model-neutral `ChatModel` (`lrg-providers/src/chat.rs`);
+`local_chat.rs` puts a local engine behind it, calling tools by decoding
+against a JSON Schema with one branch per tool, since llama.cpp cannot render
+the Jinja templates that carry a model's native tool-call format.
+Their build requirements differ, so they are covered separately below.
 
 **Which one ships is a per-platform decision.** Release builds enable
 `llamacpp` on **Windows only**; the **macOS build is MLX-only** and does not
@@ -460,10 +469,12 @@ export HF_ENDPOINT=https://huggingface.co
 
 There are no tuning knobs to match llama.cpp's `n_ctx`/`n_parallel`/GPU layers,
 and that is not an oversight: `GuidedGenerationLoop.run` in mlx-swift-lm
-allocates a fresh KV cache per call, so there is no pinned prompt prefix to
+allocates a fresh KV cache per call, so indexing has no pinned prompt prefix to
 size a context window around, the preferred batch size is 1, and the grammar is
-compiled per request. The prompt is still sent pre-split and stable-first so the
-ordering is right if that changes upstream.
+compiled per photo. The prompt is still sent pre-split and stable-first so the
+ordering is right if that changes upstream. (The agent chat runs its own copy
+of that loop, which keeps a conversation's cache between turns — see
+`native/mlx-sidecar/README.md`.)
 
 ### Troubleshooting: `LRG_DISABLE_KLEIDIAI`
 
