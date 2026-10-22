@@ -1001,6 +1001,18 @@ that reads clearly worse than its siblings still does. The outstanding
 eye-state classifier (item 1 above) remains the real answer; this makes the
 proxy honest about what it can and cannot distinguish in the meantime.
 
+The second run, with capture times in place, showed the same shape one level
+down: 468 of 770 frames still rejected at gentle, 217 of them `blurred`.
+Sharpness inside one burst spans 0.01–0.10 (median 0.03), so an absolute
+0.20 threshold rejects a burst whole or not at all; and occlusion moves by
+0.1–0.35 inside one group of people (median 0.11) as heads turn, so the
+shared 0.10 margin fired in most multi-face groups. Blur therefore joined the
+relative rules — a frame with siblings is a blur defect when clearly softer
+than the sharpest of them, a single or a burst whose sharpest frame is itself
+soft keeps the absolute test, so a burst that missed focus throughout is
+still rejected whole — and occlusion got its own margin,
+`relative_occlusion_margin` (0.20, about half the proxy's range).
+
 **People are not focus stacks.** Static framing plus a wandering sharp region
 is how a stack is recognised, and it is also what a group of people shifting
 their weight between frames looks like. `SetFrame::faces` now carries
@@ -1009,8 +1021,14 @@ their weight between frames looks like. `SetFrame::faces` now carries
 The first run's flag writing, undo, respect-existing protection and
 collections all behaved as designed: 96 picks flagged (103 picks minus the 7
 "stacks", which are never flagged), 49 purple labels, 0 rejects (as
-configured), confirmed by reading the catalog. The second run, after these
-fixes, is what the numbers above should be compared against.
+configured), confirmed by reading the catalog. The second run (830 frames,
+respect-existing off) grouped sanely — 192 groups, the largest 23 frames,
+burst windows of 1–12 s, no "stacks" — rewrote the flags (101 picks set, 7
+earlier picks unflagged, 22 labels) and brought rejects from 84% to 61%; the
+blur and occlusion changes above are measured against that run's stored
+metrics, not yet against a hand cull. **None of these margins has been
+fitted to the photographer's own picks.** That is what *Export Culling
+Fixture* on this shoot is for, and it is the next step.
 
 ### Also fixed on the way past
 

@@ -284,11 +284,15 @@ badly (whole sequences of similar frames collapse into one group with one
 pick), so the plugin offers to prepare them again once; a photo that has no
 capture time anywhere is remembered as such and not asked about again.
 
-Face-based rejects — a blink, a blocked face, a weak face — are judged
-against the other frames of the group as well as against fixed thresholds: a
-frame is only a blink when its eyes read clearly less open than the best frame
-of its burst. On small faces the eye estimate reads "closed" on every frame,
-and without this every frame but the pick was a reject.
+Rejects for blur, a blink, a blocked face or a weak face are judged against
+the other frames of the group as well as against fixed thresholds: a frame is
+only a blink when its eyes read clearly less open than the best frame of its
+burst, and only blurred when clearly softer than the sharpest frame of it. On
+small faces the eye estimate reads "closed" on every frame, and the frames of
+one burst are almost equally sharp, so without this every frame but the pick
+was a reject. A single photo, or a burst whose sharpest frame is itself soft,
+is still judged on its own: a burst that missed focus throughout is rejected
+whole.
 
 ## Tips for best results
 

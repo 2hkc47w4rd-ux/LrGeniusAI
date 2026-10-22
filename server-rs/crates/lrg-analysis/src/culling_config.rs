@@ -243,8 +243,16 @@ pub struct RankingConfig {
     pub relative_defect_rules: bool,
     /// How far below the group's best (eye openness, face score) or above its
     /// best (occlusion) a frame must sit for the proxy to count as a defect
-    /// under [`Self::relative_defect_rules`].
+    /// under [`Self::relative_defect_rules`]. Also the margin for blur: a
+    /// frame with siblings is a blur defect only when clearly softer than the
+    /// sharpest of them, since one burst's frames sit within 0.01–0.10 of each
+    /// other and an absolute threshold alone rejects all of them or none.
     pub relative_defect_margin: f64,
+    /// The occlusion proxy's own margin. It moves by 0.1–0.35 between frames
+    /// of one group of people (head turns, side light; median spread 0.11
+    /// measured on a real shoot), roughly half its whole range, so the
+    /// shared margin fired in most multi-face groups.
+    pub relative_occlusion_margin: f64,
 }
 
 /// Which deliberately-captured multi-frame set a group is, if any.
@@ -414,6 +422,7 @@ const BASE: CullingConfig = CullingConfig {
         reason_moment_margin: 0.15,
         relative_defect_rules: true,
         relative_defect_margin: 0.10,
+        relative_occlusion_margin: 0.20,
     },
     sets: SetDetectionConfig {
         enabled: true,

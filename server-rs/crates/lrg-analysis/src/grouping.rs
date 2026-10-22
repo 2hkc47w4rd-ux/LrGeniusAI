@@ -225,6 +225,14 @@ struct Scored<'a> {
     /// The eyes-closed gate cleared: closed eyes here are a kiss or a laugh,
     /// and do not count as a blink.
     eyes_closed_intended: bool,
+    /// The blur defect on its own: soft, and under the relative rules clearly
+    /// softer than the sharpest frame of the group.
+    soft: bool,
+    /// The blink and occlusion *labels*: the reason thresholds, which are
+    /// looser than the reject ones, and relative to the group where the
+    /// rules are.
+    blink: bool,
+    occluded: bool,
     /// Blurred, eyes shut or face obstructed: the defects that make a frame
     /// unusable however strong its moment, because no edit repairs them.
     hard_defect: bool,
@@ -458,6 +466,9 @@ fn rank_group_records(
                     .map(unit),
                 moment: None,
                 eyes_closed_intended,
+                soft: false,
+                blink: false,
+                occluded: false,
                 hard_defect: false,
                 weak_face: false,
                 cull_exposure: exposure,
@@ -517,8 +528,14 @@ fn rank_group_records(
         .map(|s| s.cull_occlusion)
         .fold(f64::MAX, f64::min);
     let best_face_score = faced.map(|s| s.cull_face_score).fold(f64::MIN, f64::max);
+    let best_sharpness = scored
+        .iter()
+        .map(|s| s.sharpness_effective)
+        .fold(f64::MIN, f64::max);
+    let group_size = scored.len();
     let relative = rk.relative_defect_rules;
     let margin = rk.relative_defect_margin.max(0.0);
+    let occlusion_margin = rk.relative_occlusion_margin.max(0.0);
 
     for item in scored.iter_mut() {
         // A kiss or a laugh with the eyes shut is not a blink, so the gate
@@ -585,9 +602,37 @@ fn rank_group_records(
         let blink_defect = !item.eyes_closed_intended
             && item.cull_blink_penalty > rk.reject_blink_penalty_threshold
             && (!relative || item.cull_eye_openness < best_eye_openness - margin);
+        // Occlusion gets its own, wider margin: head turns and side light move
+        // it by 0.1–0.35 inside one group of people (median 0.11 measured),
+        // so the shared margin fired on a frame in most multi-face groups.
         let occlusion_defect = item.cull_occlusion > rk.reject_occlusion_threshold
-            && (!relative || item.cull_occlusion > least_occlusion + margin);
-        item.hard_defect = item.sharpness_effective < rk.reason_blur_threshold
+            && (!relative || item.cull_occlusion > least_occlusion + occlusion_margin);
+        // Blur too: inside one burst the frames are within 0.01–0.10 of each
+        // other, so an absolute threshold either rejects the whole burst or
+        // none of it. A frame is a blur defect when it is soft *and*, where
+        // it has siblings, clearly softer than the sharpest of them. A single
+        // keeps the absolute test — there is nothing to compare it with.
+        // When the sharpest frame is itself soft there is no usable sibling
+        // to measure against, and the burst missed focus throughout: every
+        // frame is a defect, as before.
+        let blur_defect = item.sharpness_effective < rk.reason_blur_threshold
+            && (!relative
+                || group_size == 1
+                || best_sharpness < rk.reason_blur_threshold
+                || item.sharpness_effective < best_sharpness - margin);
+        item.soft = blur_defect;
+        // Labelled at the *reason* thresholds (looser than the reject ones),
+        // relative to the group where the rules are relative.
+        item.blink = group_has_faces
+            && item.cull_face_count > 0
+            && !item.eyes_closed_intended
+            && item.cull_blink_penalty > rk.reason_possible_blink_threshold
+            && (!relative || item.cull_eye_openness < best_eye_openness - margin);
+        item.occluded = group_has_faces
+            && item.cull_face_count > 0
+            && item.cull_occlusion > rk.reason_occlusion_threshold
+            && (!relative || item.cull_occlusion > least_occlusion + occlusion_margin);
+        item.hard_defect = blur_defect
             || (group_has_faces && item.cull_face_count > 0 && (blink_defect || occlusion_defect));
         item.weak_face = group_has_faces
             && item.cull_face_count > 0
@@ -681,7 +726,9 @@ fn rank_group_records(
         let reject_candidate = rejects[i];
         let is_winner = winner_index == Some(i);
         let mut reason_codes = Vec::new();
-        let is_soft = item.sharpness_effective < rk.reason_blur_threshold;
+        // The label follows the defect decision, so a frame is not called
+        // "blurred" in the explanation while ranking as usable.
+        let is_soft = item.soft;
         if is_soft {
             // Same threshold, different diagnosis. A soft frame whose gradients
             // all point one way is camera shake; one whose gradients point
@@ -724,19 +771,23 @@ fn rank_group_records(
             } else if item.cull_face_score < (max_face_score - rk.reason_weak_face_delta).max(0.0) {
                 reason_codes.push("weak_face_quality".to_string());
             }
-            if item.cull_occlusion > rk.reason_occlusion_threshold {
+            // The labels follow the defect decisions. Under the relative
+            // rules a proxy that reads the same on every frame of a burst is
+            // not reported on any of them — "possible blink" on 400 frames of
+            // one shoot explained nothing.
+            if item.occluded {
                 reason_codes.push("possible_occlusion".to_string());
             }
             if item.cull_eye_openness >= (max_eye_openness - rk.reason_eyes_open_delta).max(0.0)
                 && is_winner
             {
                 reason_codes.push("eyes_open_best".to_string());
-            } else if item.cull_blink_penalty > rk.reason_possible_blink_threshold {
-                reason_codes.push(if item.eyes_closed_intended {
-                    "eyes_closed_intentional".to_string()
-                } else {
-                    "possible_blink".to_string()
-                });
+            } else if item.eyes_closed_intended
+                && item.cull_blink_penalty > rk.reason_possible_blink_threshold
+            {
+                reason_codes.push("eyes_closed_intentional".to_string());
+            } else if item.blink {
+                reason_codes.push("possible_blink".to_string());
             }
         }
         // Explains the pick a technical reading would not have made. Emitted
@@ -1438,11 +1489,11 @@ mod tests {
             r
         };
         // Every frame reads as a blink (penalty 0.85 > 0.75), obstructed
-        // (0.80 > 0.75) and weak-faced (0.25 < 0.30) under the absolute rules.
+        // and weak-faced (0.25 < 0.30) under the absolute rules.
         let burst = vec![
-            frame("a", 1000.0, 0.15, 0.80),
-            frame("b", 1000.5, 0.14, 0.80),
-            frame("c", 1001.0, 0.15, 0.80),
+            frame("a", 1000.0, 0.15, 0.70),
+            frame("b", 1000.5, 0.14, 0.70),
+            frame("c", 1001.0, 0.15, 0.70),
         ];
         let groups = run(burst.clone());
         assert_eq!(groups.len(), 1);
@@ -1460,6 +1511,7 @@ mod tests {
         // whose face is visibly more obstructed, still is.
         let mut worse = burst.clone();
         worse.push(frame("blink", 1001.5, 0.02, 0.80));
+        // 0.25 above the clearest face: past occlusion's own, wider margin.
         worse.push(frame("covered", 1002.0, 0.15, 0.95));
         let groups = run(worse);
         let rejects = &groups[0].reject_candidate_photo_ids;
